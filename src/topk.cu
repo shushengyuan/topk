@@ -22,7 +22,6 @@ __global__ void docQueryScoringCoalescedMemoryAccessSampleKernel(
 
   __shared__ uint16_t query_on_shm[MAX_QUERY_SIZE];
   // 使用循环展开来减少分支冲突
-#pragma unroll
   for (auto i = threadIdx.x; i < query_len; i += blockDim.x) {
     query_on_shm[i] = query[i];  // 不太高效的查询加载，假设它不是热点
   }
@@ -131,7 +130,7 @@ void doc_query_scoring_gpu_function(
     const size_t query_len = query.size();
     cudaMallocAsync(&d_query, sizeof(uint16_t) * query_len, stream);
     cudaMemcpyAsync(d_query, query.data(), sizeof(uint16_t) * query_len,
-                    cudaMemcpyHostToDevice);
+                    cudaMemcpyHostToDevice, stream);
     // launch kernel
     int block = N_THREADS_IN_ONE_BLOCK;
     int grid = (n_docs + block - 1) / block;
