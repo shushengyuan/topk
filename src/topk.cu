@@ -1,4 +1,6 @@
 
+#include <algorithm>  // 引入算法头文件
+
 #include "topk.h"
 
 typedef uint4 group_t;  // uint32_t
@@ -48,7 +50,7 @@ __global__ void docQueryScoringCoalescedMemoryAccessSampleKernel(
           break;
           // return;
         }
-
+#pragma unroll
         while (query_idx < query_len &&
                query_on_shm[query_idx] < doc_segment[j]) {
           ++query_idx;
@@ -63,6 +65,7 @@ __global__ void docQueryScoringCoalescedMemoryAccessSampleKernel(
     scores[doc_id] = tmp_score / max(query_len, doc_lens[doc_id]);  // tid
   }
 }
+
 void doc_query_scoring_gpu_function(
     std::vector<std::vector<uint16_t>> &querys,
     std::vector<std::vector<uint16_t>> &docs, std::vector<uint16_t> &lens,
@@ -113,23 +116,33 @@ void doc_query_scoring_gpu_function(
   for (int i = 0; i < n_docs; ++i) {
     s_indices[i] = i;
   }
+
+  cudaStream_t stream = cudaStreamPerThread;
+
+  cudaMemPool_t memPool;
+  // cudaDeviceGetDefaultMemPool(&mempool, device);
+  cudaDeviceGetMemPool(&memPool, 0);
+  uint64_t threshold = UINT64_MAX;
+  cudaMemPoolSetAttribute(memPool, cudaMemPoolAttrReleaseThreshold, &threshold);
+
   for (auto &query : querys) {
     // init indices
 
     const size_t query_len = query.size();
-    cudaMalloc(&d_query, sizeof(uint16_t) * query_len);
-    cudaMemcpy(d_query, query.data(), sizeof(uint16_t) * query_len,
-               cudaMemcpyHostToDevice);
+    cudaMallocAsync(&d_query, sizeof(uint16_t) * query_len, stream);
+    // cudaMemcpyAsync(d_query, query.data(), sizeof(uint16_t) * query_len,
+    // cudaMemcpyHostToDevice, stream);
 
     // launch kernel
     int block = N_THREADS_IN_ONE_BLOCK;
     int grid = (n_docs + block - 1) / block;
-    docQueryScoringCoalescedMemoryAccessSampleKernel<<<grid, block>>>(
+    docQueryScoringCoalescedMemoryAccessSampleKernel<<<grid, block, 0,
+                                                       stream>>>(
         d_docs, d_doc_lens, n_docs, d_query, query_len, d_scores);
-    cudaDeviceSynchronize();
+    cudaStreamSynchronize(stream);
 
-    cudaMemcpy(scores.data(), d_scores, sizeof(float) * n_docs,
-               cudaMemcpyDeviceToHost);
+    // cudaMemcpyAsync(scores.data(), d_scores, sizeof(float) * n_docs,
+    //                 cudaMemcpyDeviceToHost);
 
     // sort scores
     std::partial_sort(s_indices.begin(), s_indices.begin() + TOPK,
@@ -142,12 +155,12 @@ void doc_query_scoring_gpu_function(
     std::vector<int> s_ans(s_indices.begin(), s_indices.begin() + TOPK);
     indices.push_back(s_ans);
 
-    cudaFree(d_query);
+    cudaFreeAsync(d_query, stream);
   }
 
   // deallocation
   cudaFree(d_docs);
-  // cudaFree(d_query);
+  // cudaFreeAsync(d_query);
   cudaFree(d_scores);
   cudaFree(d_doc_lens);
   free(h_docs);
