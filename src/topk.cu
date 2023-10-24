@@ -8,7 +8,7 @@ typedef uint4 group_t;  // uint32_t
 
 // 定义一个函数模板，用于指定块的大小
 template <unsigned int blockSize>
-__global__ void docQueryScoringCoalescedMemoryAccessSampleKernelNew(
+__global__ void docQueryScoringCoalescedMemoryAccessSampleKernel(
     const __restrict__ uint16_t *docs, const int *doc_lens, const size_t n_docs,
     uint16_t *query, const int query_len, float *scores) {
   // 每个线程处理一个文档-查询对的评分任务
@@ -49,7 +49,7 @@ __global__ void docQueryScoringCoalescedMemoryAccessSampleKernelNew(
           break;
           // return;
         }
-        // 使用位运算代替求余运算
+
         while (query_idx < query_len &&
                query_on_shm[query_idx] < doc_segment[j]) {
           ++query_idx;
