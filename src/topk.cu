@@ -126,11 +126,10 @@ void doc_query_scoring_gpu_function(
     int grid = (n_docs + block - 1) / block;
     docQueryScoringCoalescedMemoryAccessSampleKernel<<<grid, block>>>(
         d_docs, d_doc_lens, n_docs, d_query, query_len, d_scores);
-    cudaStreamSynchronize(stream);
 
     cudaMemcpyAsync(scores.data(), d_scores, sizeof(float) * n_docs,
                     cudaMemcpyDeviceToHost, stream);
-
+    cudaStreamSynchronize(stream);
     // sort scores
     std::partial_sort(s_indices.begin(), s_indices.begin() + TOPK,
                       s_indices.end(), [&scores](const int &a, const int &b) {
