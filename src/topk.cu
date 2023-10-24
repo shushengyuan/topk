@@ -110,11 +110,12 @@ void doc_query_scoring_gpu_function(
 
   cudaSetDevice(0);
 
+#pragma unroll
+  for (int i = 0; i < n_docs; ++i) {
+    s_indices[i] = i;
+  }
   for (auto &query : querys) {
     // init indices
-    for (int i = 0; i < n_docs; ++i) {
-      s_indices[i] = i;
-    }
 
     const size_t query_len = query.size();
     cudaMalloc(&d_query, sizeof(uint16_t) * query_len);
