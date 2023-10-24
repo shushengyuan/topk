@@ -1,4 +1,6 @@
 
+#include <algorithm>  // 引入算法头文件
+
 #include "topk.h"
 
 typedef uint4 group_t;  // uint32_t
@@ -113,11 +115,21 @@ void doc_query_scoring_gpu_function(
   for (int i = 0; i < n_docs; ++i) {
     s_indices[i] = i;
   }
+  size_t maxnn = 0;
+
+  auto max_query =
+      std::max_element(querys.begin(), querys.end(),
+                       [](std::vector<uint16_t> a, std::vector<uint16_t> b) {
+                         return a.size() < b.size();
+                       });    // 使用lambda表达式作为比较函数
+  maxnn = max_query->size();  // 获取最大长度
+  cudaMalloc(&d_query, sizeof(uint16_t) * maxnn);
+
   for (auto &query : querys) {
     // init indices
 
     const size_t query_len = query.size();
-    cudaMalloc(&d_query, sizeof(uint16_t) * query_len);
+    // cudaMalloc(&d_query, sizeof(uint16_t) * query_len);
     cudaMemcpy(d_query, query.data(), sizeof(uint16_t) * query_len,
                cudaMemcpyHostToDevice);
 
@@ -142,12 +154,12 @@ void doc_query_scoring_gpu_function(
     std::vector<int> s_ans(s_indices.begin(), s_indices.begin() + TOPK);
     indices.push_back(s_ans);
 
-    cudaFree(d_query);
+    // cudaFree(d_query);
   }
 
   // deallocation
   cudaFree(d_docs);
-  // cudaFree(d_query);
+  cudaFree(d_query);
   cudaFree(d_scores);
   cudaFree(d_doc_lens);
   free(h_docs);
