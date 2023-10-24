@@ -1,6 +1,4 @@
 
-#include <algorithm>  // 引入算法头文件
-
 #include "topk.h"
 
 typedef uint4 group_t;  // uint32_t
@@ -9,7 +7,8 @@ typedef uint4 group_t;  // uint32_t
 #define WARP_SIZE 32
 
 // 定义一个函数模板，用于指定块的大小
-__global__ void docQueryScoringCoalescedMemoryAccessSampleKernel(
+template <unsigned int blockSize>
+__global__ void docQueryScoringCoalescedMemoryAccessSampleKernelNew(
     const __restrict__ uint16_t *docs, const int *doc_lens, const size_t n_docs,
     uint16_t *query, const int query_len, float *scores) {
   // 每个线程处理一个文档-查询对的评分任务
@@ -23,7 +22,7 @@ __global__ void docQueryScoringCoalescedMemoryAccessSampleKernel(
   __shared__ uint16_t query_on_shm[MAX_QUERY_SIZE];
   // 使用循环展开来减少分支冲突
 #pragma unroll
-  for (auto i = threadIdx.x; i < query_len; i += blockDim.x) {
+  for (auto i = threadIdx.x; i < query_len; i += blockSize) {
     query_on_shm[i] = query[i];  // 不太高效的查询加载，假设它不是热点
   }
 
@@ -50,7 +49,7 @@ __global__ void docQueryScoringCoalescedMemoryAccessSampleKernel(
           break;
           // return;
         }
-#pragma unroll
+        // 使用位运算代替求余运算
         while (query_idx < query_len &&
                query_on_shm[query_idx] < doc_segment[j]) {
           ++query_idx;
@@ -65,7 +64,6 @@ __global__ void docQueryScoringCoalescedMemoryAccessSampleKernel(
     scores[doc_id] = tmp_score / max(query_len, doc_lens[doc_id]);  // tid
   }
 }
-
 void doc_query_scoring_gpu_function(
     std::vector<std::vector<uint16_t>> &querys,
     std::vector<std::vector<uint16_t>> &docs, std::vector<uint16_t> &lens,
@@ -112,32 +110,26 @@ void doc_query_scoring_gpu_function(
 
   cudaSetDevice(0);
 
-#pragma unroll
-  for (int i = 0; i < n_docs; ++i) {
-    s_indices[i] = i;
-  }
-
-  cudaStream_t stream = cudaStreamPerThread;
-
-  cudaMemPool_t memPool;
-  // cudaDeviceGetDefaultMemPool(&mempool, device);
-  cudaDeviceGetMemPool(&memPool, 0);
-  uint64_t threshold = UINT64_MAX;
-  cudaMemPoolSetAttribute(memPool, cudaMemPoolAttrReleaseThreshold, &threshold);
-
   for (auto &query : querys) {
     // init indices
+    for (int i = 0; i < n_docs; ++i) {
+      s_indices[i] = i;
+    }
 
     const size_t query_len = query.size();
-    cudaMallocAsync(&d_query, sizeof(uint16_t) * query_len, stream);
-    cudaMemcpyAsync(d_query, query.data(), sizeof(uint16_t) * query_len,
-                    cudaMemcpyHostToDevice);
+    cudaMalloc(&d_query, sizeof(uint16_t) * query_len);
+    cudaMemcpy(d_query, query.data(), sizeof(uint16_t) * query_len,
+               cudaMemcpyHostToDevice);
+
     // launch kernel
     int block = N_THREADS_IN_ONE_BLOCK;
     int grid = (n_docs + block - 1) / block;
     docQueryScoringCoalescedMemoryAccessSampleKernel<<<grid, block>>>(
         d_docs, d_doc_lens, n_docs, d_query, query_len, d_scores);
-    cudaStreamSynchronize(stream);
+    cudaDeviceSynchronize();
+
+    cudaMemcpy(scores.data(), d_scores, sizeof(float) * n_docs,
+               cudaMemcpyDeviceToHost);
 
     // sort scores
     std::partial_sort(s_indices.begin(), s_indices.begin() + TOPK,
@@ -150,12 +142,12 @@ void doc_query_scoring_gpu_function(
     std::vector<int> s_ans(s_indices.begin(), s_indices.begin() + TOPK);
     indices.push_back(s_ans);
 
-    cudaFreeAsync(d_query, stream);
+    cudaFree(d_query);
   }
 
   // deallocation
   cudaFree(d_docs);
-  // cudaFreeAsync(d_query);
+  // cudaFree(d_query);
   cudaFree(d_scores);
   cudaFree(d_doc_lens);
   free(h_docs);
