@@ -114,6 +114,7 @@ void doc_query_scoring_gpu_function(
   for (int i = 0; i < n_docs; ++i) {
     s_indices[i] = i;
   }
+#pragma unroll
   for (auto &query : querys) {
     // init indices
 
