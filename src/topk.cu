@@ -123,19 +123,22 @@ void doc_query_scoring_gpu_function(
 
   cudaSetDevice(0);
 
+  cudaStream_t stream = cudaStreamPerThread;
+
+  // cudaMemPool_t memPool;
+  // // cudaDeviceGetDefaultMemPool(&mempool, device);
+  // cudaDeviceGetMemPool(&memPool, 0);
+  // uint64_t threshold = UINT64_MAX;
+  // cudaMemPoolSetAttribute(memPool, cudaMemPoolAttrReleaseThreshold,
+  // &threshold);
+
+  int block = N_THREADS_IN_ONE_BLOCK;
+  int grid = (n_docs + block - 1) / block;
 #pragma unroll
   for (int i = 0; i < n_docs; ++i) {
     s_indices[i] = i;
   }
-
-  cudaStream_t stream = cudaStreamPerThread;
-
-  cudaMemPool_t memPool;
-  // cudaDeviceGetDefaultMemPool(&mempool, device);
-  cudaDeviceGetMemPool(&memPool, 0);
-  uint64_t threshold = UINT64_MAX;
-  cudaMemPoolSetAttribute(memPool, cudaMemPoolAttrReleaseThreshold, &threshold);
-
+  int index = 0;
   for (auto &query : querys) {
     // init indices
 
@@ -144,27 +147,39 @@ void doc_query_scoring_gpu_function(
     cudaMemcpyAsync(d_query, query.data(), sizeof(uint16_t) * query_len,
                     cudaMemcpyHostToDevice, stream);
     // launch kernel
-    int block = N_THREADS_IN_ONE_BLOCK;
-    int grid = (n_docs + block - 1) / block;
-    docQueryScoringCoalescedMemoryAccessSampleKernel<<<grid, block>>>(
+
+    docQueryScoringCoalescedMemoryAccessSampleKernel<<<grid, block, 0,
+                                                       stream>>>(
         d_docs, d_doc_lens, n_docs, d_query, query_len, d_scores);
+
+    if (index++ != 0) {
+      std::partial_sort(s_indices.begin(), s_indices.begin() + TOPK,
+                        s_indices.end(), [&scores](const int &a, const int &b) {
+                          if (scores[a] != scores[b]) {
+                            return scores[a] > scores[b];  // 按照分数降序排序
+                          }
+                          return a < b;  // 如果分数相同，按索引从小到大排序
+                        });
+      std::vector<int> s_ans(s_indices.begin(), s_indices.begin() + TOPK);
+      indices.push_back(s_ans);
+    }
 
     cudaMemcpyAsync(scores.data(), d_scores, sizeof(float) * n_docs,
                     cudaMemcpyDeviceToHost, stream);
-    cudaStreamSynchronize(stream);
-    // sort scores
-    std::partial_sort(s_indices.begin(), s_indices.begin() + TOPK,
-                      s_indices.end(), [&scores](const int &a, const int &b) {
-                        if (scores[a] != scores[b]) {
-                          return scores[a] > scores[b];  // 按照分数降序排序
-                        }
-                        return a < b;  // 如果分数相同，按索引从小到大排序
-                      });
-    std::vector<int> s_ans(s_indices.begin(), s_indices.begin() + TOPK);
-    indices.push_back(s_ans);
-
-    cudaFreeAsync(d_query, stream);
   }
+
+  // cudaStreamSynchronize(stream);
+  std::partial_sort(s_indices.begin(), s_indices.begin() + TOPK,
+                    s_indices.end(), [&scores](const int &a, const int &b) {
+                      if (scores[a] != scores[b]) {
+                        return scores[a] > scores[b];  // 按照分数降序排序
+                      }
+                      return a < b;  // 如果分数相同，按索引从小到大排序
+                    });
+  std::vector<int> s_ans(s_indices.begin(), s_indices.begin() + TOPK);
+  indices.push_back(s_ans);
+
+  cudaFreeAsync(d_query, stream);
 
   // deallocation
   cudaFree(d_docs);
