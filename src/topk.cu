@@ -3,6 +3,16 @@
 typedef uint4 group_t;  // uint32_t
 const size_t group_size = 8;
 
+#define CHECK(call)                                          \
+  {                                                          \
+    const cudaError_t error = call;                          \
+    if (error != cudaSuccess) {                              \
+      fprintf(stderr, "Error: %s:%d, ", __FILE__, __LINE__); \
+      fprintf(stderr, "code: %d, reason: %s\n", error,       \
+              cudaGetErrorString(error));                    \
+    }                                                        \
+  }
+
 void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
     const __restrict__ uint16_t *docs, const int *doc_lens, const size_t n_docs,
     uint16_t *query, const int query_len, float *scores) {
@@ -140,18 +150,18 @@ void doc_query_scoring_gpu_function(
     // init indices
 
     const size_t query_len = query.size();
-    cudaMallocAsync(&d_query, sizeof(uint16_t) * query_len, stream);
-    cudaMemcpyAsync(d_query, query.data(), sizeof(uint16_t) * query_len,
-                    cudaMemcpyHostToDevice, stream);
+    CHECK(cudaMallocAsync(&d_query, sizeof(uint16_t) * query_len, stream));
+    CHECK(cudaMemcpyAsync(d_query, query.data(), sizeof(uint16_t) * query_len,
+                          cudaMemcpyHostToDevice, stream));
     // launch kernel
     int block = N_THREADS_IN_ONE_BLOCK;
     int grid = (n_docs + block - 1) / block;
     docQueryScoringCoalescedMemoryAccessSampleKernel<<<grid, block>>>(
         d_docs, d_doc_lens, n_docs, d_query, query_len, d_scores);
 
-    cudaMemcpyAsync(scores.data(), d_scores, sizeof(float) * n_docs,
-                    cudaMemcpyDeviceToHost, stream);
-    cudaStreamSynchronize(stream);
+    CHECK(cudaMemcpyAsync(scores.data(), d_scores, sizeof(float) * n_docs,
+                          cudaMemcpyDeviceToHost, stream));
+    CHECK(cudaStreamSynchronize(stream));
     // sort scores
     std::partial_sort(s_indices.begin(), s_indices.begin() + TOPK,
                       s_indices.end(), [&scores](const int &a, const int &b) {
@@ -163,7 +173,7 @@ void doc_query_scoring_gpu_function(
     std::vector<int> s_ans(s_indices.begin(), s_indices.begin() + TOPK);
     indices.push_back(s_ans);
 
-    cudaFreeAsync(d_query, stream);
+    CHECK(cudaFreeAsync(d_query, stream));
   }
 
   // deallocation
