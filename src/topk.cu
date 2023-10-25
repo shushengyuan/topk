@@ -13,7 +13,7 @@ const size_t group_size = 8;
     }                                                        \
   }
 
-void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
+__global__ void docQueryScoringCoalescedMemoryAccessSampleKernel(
     const __restrict__ uint16_t *docs, const int *doc_lens, const size_t n_docs,
     uint16_t *query, const int query_len, float *scores) {
   // each thread process one doc-query pair scoring task
@@ -55,7 +55,7 @@ void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
         int right = query_len - 1;
         int mid;
         while (left <= right) {
-          mid = (left + right) / 2;
+          mid = (left + right) >> 1;
           if (query_on_shm[mid] < doc_segment[j]) {
             left = mid + 1;
           } else {
@@ -71,6 +71,38 @@ void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
       __syncwarp();
     }
     scores[doc_id] = tmp_score / max(query_len, doc_lens[doc_id]);  // tid
+  }
+}
+
+__global__ void bitonicSort(int *a, int n_p, bool descending) {
+  unsigned int tid = threadIdx.x;
+
+  int stride_p, half_stride_p, s_p, hs_p, hs, i, j, k, t, hn;
+  bool orange;
+  hn = 1 << (n_p - 1);
+  half_stride_p = 0;
+  for (stride_p = 1; stride_p <= n_p; stride_p++) {
+    s_p = stride_p;
+    while (s_p >= 1) {
+      hs_p = s_p - 1;
+      hs = 1 << hs_p;
+      for (i = tid; i < hn; i += blockDim.x) {
+        orange = (i >> half_stride_p) % 2 == 0;
+        j = ((i >> hs_p) << s_p) + (i % hs);
+        k = j + hs;
+        if ((descending &&
+             ((orange && a[j] < a[k]) || (!orange && a[j] > a[k]))) ||
+            (!descending &&
+             ((orange && a[j] > a[k]) || (!orange && a[j] < a[k])))) {
+          t = a[k];
+          a[k] = a[j];
+          a[j] = t;
+        }
+      }
+      __syncthreads();
+      s_p = hs_p;
+    }
+    half_stride_p++;
   }
 }
 
@@ -105,7 +137,6 @@ void doc_query_scoring_gpu_function(
 
   constexpr int layer_0_shift =
       __builtin_ctz(group_sz);  // 计算layer_0_stride是2的多少次方
-  printf("%d \n", layer_0_shift);
   constexpr auto layer_2_mask = group_sz - 1;
 
   for (int i = 0; i < docs.size(); i++) {
@@ -163,6 +194,8 @@ void doc_query_scoring_gpu_function(
                           cudaMemcpyDeviceToHost, stream));
     CHECK(cudaStreamSynchronize(stream));
     // sort scores
+    // int sort_size = scores.size();
+    // bitonicSort<<<1, sort_size>>>(dvals, p, descending);
     std::partial_sort(s_indices.begin(), s_indices.begin() + TOPK,
                       s_indices.end(), [&scores](const int &a, const int &b) {
                         if (scores[a] != scores[b]) {
