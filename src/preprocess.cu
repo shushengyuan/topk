@@ -2,17 +2,11 @@
 
 typedef uint4 group_t;  // uint32_t
 
-void pre_process(std::vector<std::vector<uint16_t>> &docs, float *d_scores,
-                 uint16_t *d_docs, int *d_doc_lens) {
+void pre_process(std::vector<std::vector<uint16_t>> &docs, uint16_t *h_docs,
+                 std::vector<int> &h_doc_lens_vec) {
   auto n_docs = docs.size();
 
-  cudaMalloc(&d_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs);
-  cudaMalloc(&d_scores, sizeof(float) * n_docs);
-  cudaMalloc(&d_doc_lens, sizeof(int) * n_docs);
-
-  uint16_t *h_docs = new uint16_t[MAX_DOC_SIZE * n_docs];
   memset(h_docs, 0, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs);
-  std::vector<int> h_doc_lens_vec(n_docs);
 
   constexpr auto group_sz = sizeof(group_t) / sizeof(uint16_t);
   auto layer_0_stride = n_docs * group_sz;
@@ -37,11 +31,4 @@ void pre_process(std::vector<std::vector<uint16_t>> &docs, float *d_scores,
     }
     h_doc_lens_vec[i] = docs[i].size();
   }
-
-  cudaMemcpy(d_docs, h_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs,
-             cudaMemcpyHostToDevice);
-  cudaMemcpy(d_doc_lens, h_doc_lens_vec.data(), sizeof(int) * n_docs,
-             cudaMemcpyHostToDevice);
-
-  free(h_docs);
 }

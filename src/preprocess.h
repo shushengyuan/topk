@@ -7,5 +7,5 @@
 
 #define MAX_DOC_SIZE 128
 
-void pre_process(std::vector<std::vector<uint16_t>> &docs, float *d_scores,
-                 uint16_t *d_docs, int *d_doc_lens);
+void pre_process(std::vector<std::vector<uint16_t>> &docs, uint16_t *h_docs,
+                 std::vector<int> &h_doc_lens_vec);

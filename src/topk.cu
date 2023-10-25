@@ -67,72 +67,31 @@ void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
 void doc_query_scoring_gpu_function(
     std::vector<std::vector<uint16_t>> &querys,
     std::vector<std::vector<uint16_t>> &docs, std::vector<uint16_t> &lens,
-    std::vector<std::vector<int>> &indices, float *d_scores, uint16_t *d_docs,
-    int *d_doc_lens  // shape [querys.size(), TOPK]
+    std::vector<std::vector<int>> &indices, uint16_t *h_docs,
+    std::vector<int> &h_doc_lens_vec  // shape [querys.size(), TOPK]
 ) {
-  // printf("uint4 %lu group_t %lu uint16_t %lu rest %lu
-  // \n",sizeof(uint4),sizeof(group_t),sizeof(uint16_t),sizeof(group_t) /
-  // sizeof(uint16_t));
   auto n_docs = docs.size();
   std::vector<float> scores(n_docs);
   std::vector<int> s_indices(n_docs);
-  uint16_t *d_query = nullptr;
-  //   float *d_scores = nullptr;
-  //   uint16_t *d_docs = nullptr, *d_query = nullptr;
-  //   int *d_doc_lens = nullptr;
+  float *d_scores = nullptr;
+  uint16_t *d_docs = nullptr, *d_query = nullptr;
+  int *d_doc_lens = nullptr;
 
-  //   cudaStream_t stream = cudaStreamPerThread;
-  //   // cudaMemPool_t memPool;
-  //   // // cudaDeviceGetDefaultMemPool(&mempool, device);
-  //   // cudaDeviceGetMemPool(&memPool, 0);
-  //   // uint64_t threshold = UINT64_MAX;
-  //   // cudaMemPoolSetAttribute(memPool, cudaMemPoolAttrReleaseThreshold,
-  //   // &threshold);
+  cudaStream_t stream = cudaStreamPerThread;
+  // copy to device
+  cudaMallocAsync(&d_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs, stream);
+  cudaMallocAsync(&d_scores, sizeof(float) * n_docs, stream);
+  cudaMallocAsync(&d_doc_lens, sizeof(int) * n_docs, stream);
 
-  //   // copy to device
-  //   cudaMallocAsync(&d_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs,
-  //   stream); cudaMallocAsync(&d_scores, sizeof(float) * n_docs, stream);
-  //   cudaMallocAsync(&d_doc_lens, sizeof(int) * n_docs, stream);
-
-  //   uint16_t *h_docs = new uint16_t[MAX_DOC_SIZE * n_docs];
-  //   memset(h_docs, 0, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs);
-  //   std::vector<int> h_doc_lens_vec(n_docs);
-
-  //   constexpr auto group_sz = sizeof(group_t) / sizeof(uint16_t);
-  //   auto layer_0_stride = n_docs * group_sz;
-  //   constexpr auto layer_1_stride = group_sz;
-
-  //   constexpr int layer_0_shift =
-  //       __builtin_ctz(group_sz);  // 计算layer_0_stride是2的多少次方
-  //   // printf("%d \n", layer_0_shift);
-  //   constexpr auto layer_2_mask = group_sz - 1;
-
-  //   for (int i = 0; i < docs.size(); i++) {
-  //     auto layer_1_offset = i;
-  //     auto layer_1_total_offset = layer_1_offset * layer_1_stride;
-  // #pragma unroll
-  //     for (int j = 0; j < docs[i].size(); j++) {
-  //       auto layer_0_offset = j >> layer_0_shift;
-
-  //       auto layer_2_offset = j & layer_2_mask;
-  //       auto final_offset = layer_0_offset * layer_0_stride +
-  //                           layer_1_total_offset + layer_2_offset;
-  //       h_docs[final_offset] = docs[i][j];
-  //     }
-  //     h_doc_lens_vec[i] = docs[i].size();
-  //   }
-
-  //   cudaMemcpyAsync(d_docs, h_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs,
-  //                   cudaMemcpyHostToDevice, stream);
-  //   cudaMemcpyAsync(d_doc_lens, h_doc_lens_vec.data(), sizeof(int) * n_docs,
-  //                   cudaMemcpyHostToDevice, stream);
+  cudaMemcpyAsync(d_docs, h_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs,
+                  cudaMemcpyHostToDevice, stream);
+  cudaMemcpyAsync(d_doc_lens, h_doc_lens_vec.data(), sizeof(int) * n_docs,
+                  cudaMemcpyHostToDevice, stream);
 
   cudaDeviceProp device_props;
   cudaGetDeviceProperties(&device_props, 0);
 
   cudaSetDevice(0);
-
-  cudaStream_t stream = cudaStreamPerThread;
 
   int block = N_THREADS_IN_ONE_BLOCK;
   int grid = (n_docs + block - 1) / block;
