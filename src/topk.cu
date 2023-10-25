@@ -76,14 +76,15 @@ void doc_query_scoring_gpu_function(
   uint16_t *h_docs = new uint16_t[MAX_DOC_SIZE * n_docs];
   memset(h_docs, 0, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs);
   std::vector<int> h_doc_lens_vec(n_docs);
-  auto group_sz = sizeof(group_t) / sizeof(uint16_t);
-  auto layer_0_stride = n_docs * group_sz;
-  auto layer_1_stride = group_sz;
 
-  int layer_0_shift =
+  constexpr auto group_sz = sizeof(group_t) / sizeof(uint16_t);
+  auto layer_0_stride = n_docs * group_sz;
+  constexpr auto layer_1_stride = group_sz;
+
+  constexpr int layer_0_shift =
       __builtin_ctz(group_sz);  // 计算layer_0_stride是2的多少次方
   printf("%d \n", layer_0_shift);
-  auto layer_2_mask = group_sz - 1;
+  constexpr auto layer_2_mask = group_sz - 1;
 
   for (int i = 0; i < docs.size(); i++) {
     auto layer_1_offset = i;
