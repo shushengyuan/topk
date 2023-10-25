@@ -1,6 +1,7 @@
 #include "topk.h"
 
 typedef uint4 group_t;  // uint32_t
+const size_t group_size = 8;
 
 void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
     const __restrict__ uint16_t *docs, const int *doc_lens, const size_t n_docs,
@@ -28,23 +29,31 @@ void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
 
     register bool no_more_load = false;
 
-    for (auto i = 0; i < MAX_DOC_SIZE / (sizeof(group_t) / sizeof(uint16_t));
-         i++) {
+    for (auto i = 0; i < MAX_DOC_SIZE / group_size; i++) {
       if (no_more_load) {
         break;
       }
       register group_t loaded = ((group_t *)docs)[i * n_docs + doc_id];  // tid
       register uint16_t *doc_segment = (uint16_t *)(&loaded);
-      for (auto j = 0; j < sizeof(group_t) / sizeof(uint16_t); j++) {
+      for (auto j = 0; j < group_size; j++) {
         if (doc_segment[j] == 0) {
           no_more_load = true;
           break;
           // return;
         }
-        while (query_idx < query_len &&
-               query_on_shm[query_idx] < doc_segment[j]) {
-          ++query_idx;
+        int left = query_idx;
+        int right = query_len - 1;
+        int mid;
+        while (left <= right) {
+          mid = (left + right) / 2;
+          if (query_on_shm[mid] < doc_segment[j]) {
+            left = mid + 1;
+          } else {
+            right = mid - 1;
+          }
         }
+        query_idx = left;  // update the query index
+
         if (query_idx < query_len) {
           tmp_score += (query_on_shm[query_idx] == doc_segment[j]);
         }
@@ -60,6 +69,9 @@ void doc_query_scoring_gpu_function(
     std::vector<std::vector<uint16_t>> &docs, std::vector<uint16_t> &lens,
     std::vector<std::vector<int>> &indices  // shape [querys.size(), TOPK]
 ) {
+  // printf("uint4 %lu group_t %lu uint16_t %lu rest %lu
+  // \n",sizeof(uint4),sizeof(group_t),sizeof(uint16_t),sizeof(group_t) /
+  // sizeof(uint16_t));
   auto n_docs = docs.size();
   std::vector<float> scores(n_docs);
   std::vector<int> s_indices(n_docs);
