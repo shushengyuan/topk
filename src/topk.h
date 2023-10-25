@@ -13,4 +13,6 @@
 void doc_query_scoring_gpu_function(std::vector<std::vector<uint16_t>> &query,
                                     std::vector<std::vector<uint16_t>> &docs,
                                     std::vector<uint16_t> &lens,
-                                    std::vector<std::vector<int>> &indices);
+                                    std::vector<std::vector<int>> &indices,
+                                    float *d_scores, uint16_t *d_docs,
+                                    int *d_doc_lens);
