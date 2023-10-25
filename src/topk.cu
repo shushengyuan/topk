@@ -41,10 +41,19 @@ void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
           break;
           // return;
         }
-        while (query_idx < query_len &&
-               query_on_shm[query_idx] < doc_segment[j]) {
-          ++query_idx;
+        int left = query_idx;
+        int right = query_len - 1;
+        int mid;
+        while (left <= right) {
+          mid = (left + right) / 2;
+          if (query_on_shm[mid] < doc_segment[j]) {
+            left = mid + 1;
+          } else {
+            right = mid - 1;
+          }
         }
+        query_idx = left;  // update the query index
+
         if (query_idx < query_len) {
           tmp_score += (query_on_shm[query_idx] == doc_segment[j]);
         }
