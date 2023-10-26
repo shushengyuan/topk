@@ -25,6 +25,7 @@
 #include <sstream>
 #include <vector>
 
+#include "preprocess.h"
 #include "topk.h"
 
 std::vector<std::string> getFilesInDirectory(const std::string& directory) {
@@ -115,6 +116,13 @@ int main(int argc, char* argv[]) {
       std::chrono::high_resolution_clock::now();
   UserSpecifiedInput inputs(query_file_dir, doc_file_name);
   std::vector<std::vector<int>> indices;
+
+  auto n_docs = inputs.docs.size();
+  uint16_t* h_docs = new uint16_t[MAX_DOC_SIZE * n_docs];
+
+  std::vector<int> h_doc_lens_vec(n_docs);
+  pre_process(inputs.docs, h_docs, h_doc_lens_vec);
+
   std::chrono::high_resolution_clock::time_point t2 =
       std::chrono::high_resolution_clock::now();
   std::cout
@@ -124,7 +132,7 @@ int main(int argc, char* argv[]) {
 
   // 计算得分
   doc_query_scoring_gpu_function(inputs.querys, inputs.docs, inputs.doc_lens,
-                                 indices);
+                                 indices, h_docs, h_doc_lens_vec);
 
   std::chrono::high_resolution_clock::time_point t3 =
       std::chrono::high_resolution_clock::now();
