@@ -3,7 +3,6 @@
 #include "topk.h"
 
 typedef uint4 group_t;  // uint32_t
-const size_t group_size = 8;
 
 void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
     const __restrict__ uint16_t *docs, const int *doc_lens, const size_t n_docs,
@@ -31,13 +30,13 @@ void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
 
     register bool no_more_load = false;
 
-    for (auto i = 0; i < MAX_DOC_SIZE / group_size; i++) {
+    for (auto i = 0; i < MAX_DOC_SIZE / GROUP_SIZE; i++) {
       if (no_more_load) {
         break;
       }
       register group_t loaded = ((group_t *)docs)[i * n_docs + doc_id];  // tid
       register uint16_t *doc_segment = (uint16_t *)(&loaded);
-      for (auto j = 0; j < group_size; j++) {
+      for (auto j = 0; j < GROUP_SIZE; j++) {
         if (doc_segment[j] == 0) {
           no_more_load = true;
           break;
@@ -47,7 +46,7 @@ void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
         int right = query_len - 1;
         int mid;
         while (left <= right) {
-          mid = (left + right) / 2;
+          mid = (left + right) >> 1;
           if (query_on_shm[mid] < doc_segment[j]) {
             left = mid + 1;
           } else {
@@ -76,26 +75,20 @@ void pre_process(std::vector<std::vector<uint16_t>> &docs, uint16_t *h_docs,
   auto layer_0_stride = n_docs * group_sz;
   constexpr auto layer_1_stride = group_sz;
 
-  constexpr int layer_0_shift =
-      __builtin_ctz(group_sz);  // 计算layer_0_stride是2的多少次方
-  // printf("%d \n", layer_0_shift);
-  constexpr auto layer_2_mask = group_sz - 1;
-
   for (int i = 0; i < docs.size(); i++) {
     auto layer_1_offset = i;
     auto layer_1_total_offset = layer_1_offset * layer_1_stride;
 #pragma unroll
     for (int j = 0; j < docs[i].size(); j++) {
-      auto layer_0_offset = j >> layer_0_shift;
+      auto layer_0_offset = j / group_sz;
 
-      auto layer_2_offset = j & layer_2_mask;
+      auto layer_2_offset = j % group_sz;
       auto final_offset = layer_0_offset * layer_0_stride +
                           layer_1_total_offset + layer_2_offset;
       h_docs[final_offset] = docs[i][j];
     }
     h_doc_lens_vec[i] = docs[i].size();
   }
-  std::cout << "pre_process h_doc_lens_vec \n" << h_docs[0] << std::endl;
 }
 
 void doc_query_scoring_gpu_function(
