@@ -3,5 +3,5 @@ if [ -z "$ROOT_DIR" ]; then
         ROOT_DIR=$(cd $(dirname $0); pwd)
 fi
 
-nvcc $ROOT_DIR/src/main.cpp  $ROOT_DIR/src/topk.cu  $ROOT_DIR/src/preprocess.cu -o $ROOT_DIR/bin/query_doc_scoring  -I $ROOT_DIR/src -L/usr/local/cuda/lib64 -lcudart -lcuda  -O4
+nvcc $ROOT_DIR/src/main.cpp  $ROOT_DIR/src/topk.cu -o $ROOT_DIR/bin/query_doc_scoring  -I $ROOT_DIR/src -L/usr/local/cuda/lib64 -lcudart -lcuda  -O4
 echo "build success"
