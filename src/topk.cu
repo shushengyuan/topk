@@ -10,7 +10,6 @@ void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
     const __restrict__ uint16_t *docs, const int *doc_lens, const size_t n_docs,
     uint16_t *query, const int query_len, float *scores) {
   // each thread process one doc-query pair scoring task
-  printf("query_on_shm \n");
   register auto tid = blockIdx.x * blockDim.x + threadIdx.x,
                 tnum = gridDim.x * blockDim.x;
 
@@ -94,121 +93,83 @@ void pre_process(std::vector<std::vector<uint16_t>> &docs, uint16_t *h_docs,
   }
 }
 
-void doc_query_scoring_gpu_function(
+  void doc_query_scoring_gpu_function(
     std::vector<std::vector<uint16_t>> &querys,
     std::vector<std::vector<uint16_t>> &docs, std::vector<uint16_t> &lens,
     std::vector<std::vector<int>> &indices  // shape [querys.size(), TOPK]
 ) {
-  int querys_len = querys.size();
   auto n_docs = docs.size();
-  std::vector<std::vector<float>> scores(querys_len,std::vector<float>(n_docs));
+  std::vector<float> scores(n_docs);
   std::vector<int> s_indices(n_docs);
-  float **d_scores = nullptr;
+  // float *d_scores = nullptr;
   uint16_t *d_docs = nullptr;
-  uint16_t **d_query = nullptr;
+  // uint16_t *d_query = nullptr;
   int *d_doc_lens = nullptr;
-  cudaError_t res;  
-
 
   uint16_t *h_docs;
-  res = cudaMallocHost((void**)&h_docs,  sizeof(uint16_t) * MAX_DOC_SIZE * n_docs);CHECK(res)
- 
+  cudaMallocHost((void**)&h_docs,  sizeof(uint16_t) * MAX_DOC_SIZE * n_docs);
+  
   std::vector<int> h_doc_lens_vec(n_docs);
 
   std::thread t1(pre_process, std::ref(docs), h_docs, std::ref(h_doc_lens_vec));
 
   cudaStream_t stream = cudaStreamPerThread;
   // copy to device
-  res = cudaMallocAsync(&d_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs, stream);CHECK(res)
-  res = cudaMallocAsync(&d_scores, sizeof(float *) * querys_len, stream);CHECK(res)
-  res = cudaMallocAsync(&d_doc_lens, sizeof(int) * n_docs, stream);CHECK(res)
-  res = cudaMallocAsync(&d_query, sizeof(uint16_t *) * querys_len,stream);CHECK(res)
-
-  uint16_t **dq_0 = NULL;  
-  uint16_t *dq_1 = NULL;  
-
-  dq_0 = (uint16_t**)malloc(querys_len*sizeof(uint16_t*));  
-  res = cudaMalloc((void**)(&dq_1), querys_len*MAX_QUERY_SIZE*sizeof(int));CHECK(res) 
-  for (int r = 0; r < querys_len; r++)  
-    {  
-      dq_0[r] = dq_1 + r*MAX_QUERY_SIZE;  
-    } 
-
-    res = cudaMemcpyAsync((void*)(d_query), (void*)(dq_0), querys_len * sizeof(uint16_t *), cudaMemcpyHostToDevice, stream);CHECK(res)
+  cudaMallocAsync(&d_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs, stream);
+  // cudaMallocAsync(&d_scores, sizeof(float) * n_docs, stream);
+  cudaMallocAsync(&d_doc_lens, sizeof(int) * n_docs, stream);
 
   cudaDeviceProp device_props;
   cudaGetDeviceProperties(&device_props, 0);
 
   cudaSetDevice(0);
 
-   printf("cudaSetDevice \n");
-
   int block = N_THREADS_IN_ONE_BLOCK;
-  printf("block \n");
   int grid = (n_docs + block - 1) / block;
-  printf("grid \n");
+  int querys_len = querys.size();
+  // float ** scores_group;
+
 #pragma unroll
   for (int i = 0; i < n_docs; ++i) {
-    // printf("s_indicesCreate %d \n",i);
     s_indices[i] = i;
   }
   cudaStream_t *streams;
   streams = (cudaStream_t *)malloc(querys_len * sizeof(cudaStream_t));
-  printf("cudaStreamCreate \n");
   for (int i = 0; i < querys_len; i++) {
     
     cudaStreamCreate(&streams[i]);
 
   }  
-  auto error = cudaGetLastError();
-  printf("CUDA error 3: %s\n", cudaGetErrorString(error));
-   
-  for (int i = 0; i < querys_len; ++i) {
-    // init indices
-    auto &query = querys[i];
-    const size_t query_len = query.size();
-        // check for errors
-    
-    res = cudaMemcpyAsync(d_query+ i * MAX_QUERY_SIZE, query.data(), sizeof(uint16_t) * query_len,
-                    cudaMemcpyHostToDevice, streams[i]);CHECK(res)
-    error = cudaGetLastError();
-    printf("CUDA error cudaMemcpyAsync: %s\n", cudaGetErrorString(error));
-  }
-
-  error = cudaGetLastError();
-  printf("CUDA error 4: %s\n", cudaGetErrorString(error));
-
-  printf("cudaMemcpyAsync d_query \n");
   t1.join();
   cudaMemcpyAsync(d_docs, h_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs,
                   cudaMemcpyHostToDevice, stream);
   cudaMemcpyAsync(d_doc_lens, h_doc_lens_vec.data(), sizeof(int) * n_docs,
                   cudaMemcpyHostToDevice, stream);
-    
-    printf("after cudaMemcpyAsync d_query \n");
-    error = cudaGetLastError();
-  printf("CUDA error 5: %s\n", cudaGetErrorString(error));
+ 
   for (int i = 0; i < querys_len; ++i) {
-    const size_t query_len = querys[i].size();
-    // cudaMallocAsync(&d_scores[i],sizeof(float) * n_docs, stream);
-    float* ai;
-    printf("before cudaMallocAsync d_scores \n");
-    cudaMallocAsync(&ai, n_docs * sizeof(float), streams[i]);
-    printf("before cudaMemcpyAsync d_scores \n");
-    cudaMemcpyAsync(&d_scores[i], &ai, n_docs * sizeof(float), cudaMemcpyDefault, streams[i]);
-    printf("before docQueryScoringCoalescedMemoryAccessSampleKernel  \n");
-    docQueryScoringCoalescedMemoryAccessSampleKernel<<<grid, block, 0, streams[i]>>>(
-        d_docs, d_doc_lens, n_docs, d_query[i], query_len, d_scores[i]);
-        printf("after docQueryScoringCoalescedMemoryAccessSampleKernel \n");
-    cudaFreeAsync(d_query[i], streams[i]);
-    cudaFreeAsync(d_scores[i], streams[i]);
-  }
+    // init indices
+    uint16_t *d_query = nullptr;
+    float *d_scores = nullptr;
 
-  printf("docQueryScoringCoalescedMemoryAccessSampleKernel \n");
+    auto &query = querys[i];
+    const size_t query_len = query.size();
     
-   for (int i = 0; i < querys_len; ++i) {
-      cudaMemcpyAsync(scores.data(), d_scores[i], sizeof(float) * n_docs,
-                    cudaMemcpyDeviceToHost, streams[i]);
+    cudaMallocAsync(&d_query, sizeof(uint16_t) * query_len, streams[i]);
+    cudaMemcpyAsync(d_query, query.data(), sizeof(uint16_t) * query_len,
+                    cudaMemcpyHostToDevice, streams[i]);
+    cudaMallocAsync(&d_scores, sizeof(float) * n_docs, streams[i]);
+
+  // if(i == 0){
+   
+  // }
+  docQueryScoringCoalescedMemoryAccessSampleKernel<<<grid, block, 0,
+                                                       streams[i]>>>(
+        d_docs, d_doc_lens, n_docs, d_query, query_len, d_scores);
+    
+        cudaFreeAsync(d_query, streams[i]);
+        cudaMemcpyAsync(scores.data(), d_scores, sizeof(float) * n_docs,
+        cudaMemcpyDeviceToHost, streams[i]);
+        cudaFreeAsync(d_scores, streams[i]);
       std::partial_sort(s_indices.begin(), s_indices.begin() + TOPK,
                         s_indices.end(), [&scores](const int &a, const int &b) {
                           if (scores[a] != scores[b]) {
@@ -218,9 +179,12 @@ void doc_query_scoring_gpu_function(
                         });
       std::vector<int> s_ans(s_indices.begin(), s_indices.begin() + TOPK);
       indices.push_back(s_ans);
+      
     }
+    // cudaDeviceSynchronize();
+   
 
-    printf("partial_sort \n");
+  
    
     // cudaFreeAsync(d_query, stream);
 
