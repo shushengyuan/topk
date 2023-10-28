@@ -106,8 +106,9 @@ void pre_process(std::vector<std::vector<uint16_t>> &docs, uint16_t *h_docs,
   // uint16_t *d_query = nullptr;
   int *d_doc_lens = nullptr;
 
-  uint16_t *h_docs = new uint16_t[MAX_DOC_SIZE * n_docs];
-
+  uint16_t *h_docs;
+  cudaMallocHost((void**)&h_docs,  sizeof(uint16_t) * MAX_DOC_SIZE * n_docs);
+  
   std::vector<int> h_doc_lens_vec(n_docs);
 
   std::thread t1(pre_process, std::ref(docs), h_docs, std::ref(h_doc_lens_vec));
