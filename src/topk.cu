@@ -15,7 +15,7 @@ void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
     return;
   }
 
-  __shared__ uint16_t query_on_shm[MAX_QUERY_SIZE];
+  __shared__ uint32_t query_on_shm[MAX_QUERY_SIZE];
 #pragma unroll
   for (auto i = threadIdx.x; i < query_len; i += blockDim.x) {
     query_on_shm[i] = query[i];  // 不太高效的查询加载，假设它不是热点
@@ -69,8 +69,6 @@ void pre_process(std::vector<std::vector<uint16_t>> &docs, uint16_t *h_docs,
                  std::vector<int> &h_doc_lens_vec) {
   auto n_docs = docs.size();
 
-  memset(h_docs, 0, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs);
-
   constexpr auto group_sz = sizeof(group_t) / sizeof(uint16_t);
   auto layer_0_stride = n_docs * group_sz;
   constexpr auto layer_1_stride = group_sz;
@@ -103,7 +101,8 @@ void doc_query_scoring_gpu_function(
   uint16_t *d_docs = nullptr, *d_query = nullptr;
   int *d_doc_lens = nullptr;
 
-  uint16_t *h_docs = new uint16_t[MAX_DOC_SIZE * n_docs];
+  uint16_t *h_docs;
+  cudaMallocHost((void**)&h_docs,  sizeof(uint16_t) * MAX_DOC_SIZE * n_docs);
 
   std::vector<int> h_doc_lens_vec(n_docs);
 
