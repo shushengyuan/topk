@@ -1,4 +1,5 @@
 #include <thread>
+#include<omp.h>
 
 #include "topk.h"
 
@@ -76,11 +77,15 @@ void pre_process(std::vector<std::vector<uint16_t>> &docs, uint16_t *h_docs,
   constexpr auto group_sz = sizeof(group_t) / sizeof(uint16_t);
   auto layer_0_stride = n_docs * group_sz;
   constexpr auto layer_1_stride = group_sz;
+auto numProcs = omp_get_num_procs() ;
 
+omp_set_num_threads(8);
+#pragma omp parallel
+{
+#pragma omp for 
   for (int i = 0; i < docs.size(); i++) {
     auto layer_1_offset = i;
     auto layer_1_total_offset = layer_1_offset * layer_1_stride;
-#pragma unroll
     for (int j = 0; j < docs[i].size(); j++) {
       auto layer_0_offset = j / group_sz;
 
@@ -90,6 +95,7 @@ void pre_process(std::vector<std::vector<uint16_t>> &docs, uint16_t *h_docs,
       h_docs[final_offset] = docs[i][j];
     }
     h_doc_lens_vec[i] = docs[i].size();
+  }
   }
 }
 
@@ -107,7 +113,7 @@ void pre_process(std::vector<std::vector<uint16_t>> &docs, uint16_t *h_docs,
   int *d_doc_lens = nullptr;
 
   uint16_t *h_docs = new uint16_t[MAX_DOC_SIZE * n_docs];
-  
+
   std::vector<int> h_doc_lens_vec(n_docs);
 
   std::thread t1(pre_process, std::ref(docs), h_docs, std::ref(h_doc_lens_vec));
@@ -128,9 +134,15 @@ void pre_process(std::vector<std::vector<uint16_t>> &docs, uint16_t *h_docs,
   int querys_len = querys.size();
   // float ** scores_group;
 
-#pragma unroll
+auto numProcs = omp_get_num_procs() ;
+// std::cout<<numProcs<<std::endl;
+omp_set_num_threads(8);
+#pragma omp parallel
+	{
+#pragma omp for 
   for (int i = 0; i < n_docs; ++i) {
     s_indices[i] = i;
+  }
   }
   cudaStream_t *streams;
   streams = (cudaStream_t *)malloc(querys_len * sizeof(cudaStream_t));
