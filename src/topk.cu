@@ -118,11 +118,12 @@ omp_set_num_threads(8);
 
   std::thread t1(pre_process, std::ref(docs), h_docs, std::ref(h_doc_lens_vec));
 
-  cudaStream_t stream = cudaStreamPerThread;
+  cudaStream_t stream1 = cudaStreamPerThread;
+  cudaStream_t stream2 = cudaStreamPerThread;
   // copy to device
-  cudaMallocAsync(&d_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs, stream);
+  cudaMallocAsync(&d_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs, stream1);
   // cudaMallocAsync(&d_scores, sizeof(float) * n_docs, stream);
-  cudaMallocAsync(&d_doc_lens, sizeof(int) * n_docs, stream);
+  cudaMallocAsync(&d_doc_lens, sizeof(int) * n_docs, stream2);
 
   cudaDeviceProp device_props;
   cudaGetDeviceProperties(&device_props, 0);
@@ -153,9 +154,9 @@ omp_set_num_threads(8);
   }  
   t1.join();
   cudaMemcpyAsync(d_docs, h_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs,
-                  cudaMemcpyHostToDevice, stream);
+                  cudaMemcpyHostToDevice, stream1);
   cudaMemcpyAsync(d_doc_lens, h_doc_lens_vec.data(), sizeof(int) * n_docs,
-                  cudaMemcpyHostToDevice, stream);
+                  cudaMemcpyHostToDevice, stream2);
  
   for (int i = 0; i < querys_len; ++i) {
     // init indices
@@ -192,13 +193,8 @@ omp_set_num_threads(8);
       indices.push_back(s_ans);
       
     }
-    // cudaDeviceSynchronize();
-   
-
-  
-   
+    // cudaDeviceSynchronize();   
     // cudaFreeAsync(d_query, stream);
-
 
   // deallocation
   // cudaFree(d_docs);
