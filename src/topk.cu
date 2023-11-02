@@ -119,8 +119,10 @@ omp_set_num_threads(8);
 
   std::thread t1(pre_process, std::ref(docs), h_docs, std::ref(h_doc_lens_vec));
 
-  cudaStream_t stream1 = cudaStreamPerThread;
-  cudaStream_t stream2 = cudaStreamPerThread;
+  cudaStream_t stream1, stream2;
+  cudaStreamCreate(&stream1);
+  cudaStreamCreate(&stream2);
+
   // copy to device
   cudaMallocAsync(&d_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs, stream1);
   // cudaMallocAsync(&d_scores, sizeof(float) * n_docs, stream);
