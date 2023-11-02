@@ -121,7 +121,7 @@ omp_set_num_threads(8);
   cudaStream_t stream = cudaStreamPerThread;
   // copy to device
   cudaMallocAsync(&d_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs, stream);
-  cudaMallocAsync(&d_scores, sizeof(float) * n_docs, stream);
+  cudaHostAlloc(&d_scores, sizeof(float) * n_docs, cudaHostAllocDefault);
   cudaMallocAsync(&d_doc_lens, sizeof(int) * n_docs, stream);
 
   cudaDeviceProp device_props;
