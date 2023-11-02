@@ -71,7 +71,7 @@ void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
 }
 
 void pre_process(std::vector<std::vector<uint16_t>> &docs, uint16_t *h_docs,
-                 std::vector<int> &h_doc_lens_vec) {
+                 std::vector<uint32_t> &h_doc_lens_vec) {
   auto n_docs = docs.size();
 
   constexpr auto group_sz = sizeof(group_t) / sizeof(uint16_t);
@@ -95,6 +95,7 @@ omp_set_num_threads(8);
       h_docs[final_offset] = docs[i][j];
     }
     h_doc_lens_vec[i] = docs[i].size();
+    // printf("h_doc_lens_vec %d \n",docs[i].size());
   }
   }
 }
@@ -114,7 +115,7 @@ omp_set_num_threads(8);
 
   uint16_t *h_docs = new uint16_t[MAX_DOC_SIZE * n_docs];
 
-  std::vector<int> h_doc_lens_vec(n_docs);
+  std::vector<uint32_t> h_doc_lens_vec(n_docs);
 
   std::thread t1(pre_process, std::ref(docs), h_docs, std::ref(h_doc_lens_vec));
 
@@ -123,7 +124,7 @@ omp_set_num_threads(8);
   // copy to device
   cudaMallocAsync(&d_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs, stream1);
   // cudaMallocAsync(&d_scores, sizeof(float) * n_docs, stream);
-  cudaMallocAsync(&d_doc_lens, sizeof(int) * n_docs, stream2);
+  cudaMallocAsync(&d_doc_lens, sizeof(uint32_t) * n_docs, stream2);
 
   cudaDeviceProp device_props;
   cudaGetDeviceProperties(&device_props, 0);
@@ -141,13 +142,13 @@ omp_set_num_threads(8);
 #pragma omp parallel
 	{
 #pragma omp for 
-  for (int i = 0; i < n_docs; ++i) {
+  for (size_t i = 0; i < n_docs; ++i) {
     s_indices[i] = i;
   }
   }
   cudaStream_t *streams;
   streams = (cudaStream_t *)malloc(querys_len * sizeof(cudaStream_t));
-  for (int i = 0; i < querys_len; i++) {
+  for (size_t i = 0; i < querys_len; i++) {
     
     cudaStreamCreate(&streams[i]);
 
@@ -155,10 +156,10 @@ omp_set_num_threads(8);
   t1.join();
   cudaMemcpyAsync(d_docs, h_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs,
                   cudaMemcpyHostToDevice, stream1);
-  cudaMemcpyAsync(d_doc_lens, h_doc_lens_vec.data(), sizeof(int) * n_docs,
+  cudaMemcpyAsync(d_doc_lens, h_doc_lens_vec.data(), sizeof(uint32_t) * n_docs,
                   cudaMemcpyHostToDevice, stream2);
  
-  for (int i = 0; i < querys_len; ++i) {
+  for (size_t i = 0; i < querys_len; ++i) {
     // init indices
     uint16_t *d_query = nullptr;
     float *d_scores = nullptr;
