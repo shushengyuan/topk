@@ -1,15 +1,24 @@
 #include <thread>
-#include<omp.h>
+#include <omp.h>
+#include <cub/device/device_radix_sort.cuh>
+#include <cub/util_allocator.cuh>
 
+#include <nvtx3/nvToolsExt.h>
+#include <cstdlib>
 #include "topk.h"
 
+using namespace cub;
 typedef uint4 group_t;  // uint32_t
+CachingDeviceAllocator  g_allocator(true);  // Caching allocator for device memory
+
 #define CHECK(res) if(res!=cudaSuccess){exit(-1);}  
+
+
 
 
 void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
     const __restrict__ uint16_t *docs, const int *doc_lens, const size_t n_docs,
-    uint16_t *query, const int query_len, float *scores) {
+    uint16_t *query, const int query_len, float *scores, int *d_index) {
   // each thread process one doc-query pair scoring task
   register auto tid = blockIdx.x * blockDim.x + threadIdx.x,
                 tnum = gridDim.x * blockDim.x;
@@ -67,6 +76,7 @@ void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
       __syncwarp();
     }
     scores[doc_id] = tmp_score / max(query_len, doc_lens[doc_id]);  // tid
+    d_index[doc_id] = doc_id;
   }
 }
 
@@ -116,11 +126,17 @@ omp_set_num_threads(8);
 
   std::vector<int> h_doc_lens_vec(n_docs);
 
+  nvtxRangePushA("pre_process");
   std::thread t1(pre_process, std::ref(docs), h_docs, std::ref(h_doc_lens_vec));
+  nvtxRangePop();
 
   cudaStream_t stream = cudaStreamPerThread;
   // copy to device
+
+  nvtxRangePushA("h_docs_decvice_to_host_Malloc");
   cudaMallocAsync(&d_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs, stream);
+  nvtxRangePop();
+
   // cudaMallocAsync(&d_scores, sizeof(float) * n_docs, stream);
   cudaMallocAsync(&d_doc_lens, sizeof(int) * n_docs, stream);
 
@@ -152,45 +168,102 @@ omp_set_num_threads(8);
 
   }  
   t1.join();
+
+  nvtxRangePushA("h_docs_decvice_to_host_cudaMemcpyAsync");
   cudaMemcpyAsync(d_docs, h_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs,
                   cudaMemcpyHostToDevice, stream);
+  nvtxRangePop();
+  
+  nvtxRangePushA("h_doc_lens_vec.data()_decvice_to_host_cudaMemcpyAsync");
   cudaMemcpyAsync(d_doc_lens, h_doc_lens_vec.data(), sizeof(int) * n_docs,
                   cudaMemcpyHostToDevice, stream);
- 
+  nvtxRangePop();
+
   for (int i = 0; i < querys_len; ++i) {
+    // nvtx3::scoped_range range("This is a push/pop range");
     // init indices
     uint16_t *d_query = nullptr;
     float *d_scores = nullptr;
+    float *d__sort_scores = nullptr;
+
+    int *d_init_index = nullptr;
+    int *d_sort_index = nullptr;
+    int *h_sort_index = (int*)malloc(sizeof(int) * TOPK);
+
 
     auto &query = querys[i];
     const size_t query_len = query.size();
+    
+
     
     cudaMallocAsync(&d_query, sizeof(uint16_t) * query_len, streams[i]);
     cudaMemcpyAsync(d_query, query.data(), sizeof(uint16_t) * query_len,
                     cudaMemcpyHostToDevice, streams[i]);
     cudaMallocAsync(&d_scores, sizeof(float) * n_docs, streams[i]);
+    cudaMallocAsync(&d__sort_scores, sizeof(float) * n_docs, streams[i]);
+
+    cudaMallocAsync(&d_init_index, sizeof(int) * n_docs, streams[i]);
 
   // if(i == 0){
    
   // }
   docQueryScoringCoalescedMemoryAccessSampleKernel<<<grid, block, 0,
                                                        streams[i]>>>(
-        d_docs, d_doc_lens, n_docs, d_query, query_len, d_scores);
+        d_docs, d_doc_lens, n_docs, d_query, query_len, d_scores, d_init_index);
     
         cudaFreeAsync(d_query, streams[i]);
-        cudaMemcpyAsync(scores.data(), d_scores, sizeof(float) * n_docs,
-        cudaMemcpyDeviceToHost, streams[i]);
-        cudaFreeAsync(d_scores, streams[i]);
-      std::partial_sort(s_indices.begin(), s_indices.begin() + TOPK,
-                        s_indices.end(), [&scores](const int &a, const int &b) {
-                          if (scores[a] != scores[b]) {
-                            return scores[a] > scores[b];  // 按照分数降序排序
-                          }
-                          return a < b;  // 如果分数相同，按索引从小到大排序
-                        });
-      std::vector<int> s_ans(s_indices.begin(), s_indices.begin() + TOPK);
+
+        // scores.data()_decvice_to_host_cudaMemcpyAsync
+        nvtxRangePushA("scores.data()_decvice_to_host_cudaMemcpyAsync");
+        // cudaMemcpyAsync(scores.data(), d_scores, sizeof(float) * n_docs,
+        // cudaMemcpyDeviceToHost, streams[i]);
+        nvtxRangePop();
+
+
+// -----------------cpu sort --------------------------------
+        // cudaFreeAsync(d_scores, streams[i]);
+
+      // partial_sort
+      // nvtxRangePushA("partial_sort");
+      // std::partial_sort(s_indices.begin(), s_indices.begin() + TOPK,
+      //                   s_indices.end(), [&scores](const int &a, const int &b) {
+      //                     if (scores[a] != scores[b]) {
+      //                       return scores[a] > scores[b];  // 按照分数降序排序
+      //                     }
+      //                     return a < b;  // 如果分数相同，按索引从小到大排序
+      //                   });
+      // std::vector<int> s_ans(s_indices.begin(), s_indices.begin() + TOPK);
+      // indices.push_back(s_ans);
+      // nvtxRangePop();
+
+      // nvtxRangePushA("GPU_topK");
+      // uint16_t *my_topk_gpu_scores = nullptr;                  
+      // cudaMalloc(&my_topk_gpu_scores, sizeof(uint16_t) * TOPK);              
+      // top_k_gpu(d_scores, sizeof(uint16_t) * n_docs, TOPK, my_topk_gpu_scores);
+      // nvtxRangePop();
+
+// -----------------gpu sort --------------------------------
+        // Allocate host arrays
+
+      // Determine temporary device storage requirements
+      void     *d_temp_storage = NULL;
+      size_t   temp_storage_bytes = 0;
+      // int size 
+      DeviceRadixSort::SortPairs<float, int>(d_temp_storage, temp_storage_bytes,
+        d_scores, d__sort_scores, d_init_index, d_sort_index, n_docs);
+      // Allocate temporary storage
+      cudaMallocAsync(&d_temp_storage, temp_storage_bytes,streams[i]);
+      // Run sorting operation
+      DeviceRadixSort::SortPairs<float, int>(d_temp_storage, temp_storage_bytes,
+        d_scores, d__sort_scores, d_init_index, d_sort_index, n_docs);
+
+      // d_sort_index memcpy to the host as the result
+      cudaMemcpyAsync(h_sort_index , d_sort_index, sizeof(int) * TOPK, cudaMemcpyHostToHost,streams[i]);
+
+
+      std::vector<int> s_ans(h_sort_index, h_sort_index + TOPK);
       indices.push_back(s_ans);
-      
+
     }
     // cudaDeviceSynchronize();
    
@@ -207,3 +280,4 @@ omp_set_num_threads(8);
   // cudaFree(d_doc_lens);
   // free(h_docs);
 }
+
