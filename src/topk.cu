@@ -1,5 +1,8 @@
 #include <thread>
 #include<omp.h>
+#include <thrust/sort.h>
+#include <thrust/host_vector.h>
+#include <thrust/device_vector.h>
 
 #include "topk.h"
 
@@ -105,8 +108,6 @@ omp_set_num_threads(8);
     std::vector<std::vector<int>> &indices  // shape [querys.size(), TOPK]
 ) {
   auto n_docs = docs.size();
-  std::vector<float> scores(n_docs);
-  std::vector<int> s_indices(n_docs);
   // float *d_scores = nullptr;
   uint16_t *d_docs = nullptr;
   // uint16_t *d_query = nullptr;
@@ -137,13 +138,16 @@ omp_set_num_threads(8);
 auto numProcs = omp_get_num_procs() ;
 // std::cout<<numProcs<<std::endl;
 omp_set_num_threads(8);
-#pragma omp parallel
-	{
-#pragma omp for 
+// int *host_indices= new int[n_docs]; // why
+std::vector<int> host_indices(n_docs); // why
+
+// #pragma omp parallel
+//  {
+// #pragma omp for 
   for (int i = 0; i < n_docs; ++i) {
-    s_indices[i] = i;
+    host_indices[i] = i;
   }
-  }
+  // }
   cudaStream_t *streams;
   streams = (cudaStream_t *)malloc(querys_len * sizeof(cudaStream_t));
   for (int i = 0; i < querys_len; i++) {
@@ -161,6 +165,7 @@ omp_set_num_threads(8);
     // init indices
     uint16_t *d_query = nullptr;
     float *d_scores = nullptr;
+    int *s_indices= nullptr;
 
     auto &query = querys[i];
     const size_t query_len = query.size();
@@ -169,31 +174,32 @@ omp_set_num_threads(8);
     cudaMemcpyAsync(d_query, query.data(), sizeof(uint16_t) * query_len,
                     cudaMemcpyHostToDevice, streams[i]);
     cudaMallocAsync(&d_scores, sizeof(float) * n_docs, streams[i]);
+    cudaMallocAsync(&s_indices, sizeof(int) * n_docs, streams[i]);
+    cudaMemcpyAsync(s_indices, host_indices.data(), sizeof(int) * n_docs, cudaMemcpyHostToDevice, streams[i]);
 
-  // if(i == 0){
-   
-  // }
   docQueryScoringCoalescedMemoryAccessSampleKernel<<<grid, block, 0,
                                                        streams[i]>>>(
         d_docs, d_doc_lens, n_docs, d_query, query_len, d_scores);
     
         cudaFreeAsync(d_query, streams[i]);
-        cudaMemcpyAsync(scores.data(), d_scores, sizeof(float) * n_docs,
-        cudaMemcpyDeviceToHost, streams[i]);
+        // cudaMemcpyAsync(scores,d_scores, sizeof(float) * n_docs,
+        // cudaMemcpyDeviceToHost, streams[i]);
+        thrust::device_ptr<float> scores_key(d_scores);
+        thrust::device_ptr<int> s_indices_value(s_indices);
+        thrust::sort_by_key(scores_key, scores_key + n_docs, s_indices_value,thrust::greater<float>());
+       
+
+        std::vector<int> host_indices_temp(TOPK); // why
+        cudaMemcpyAsync(host_indices_temp.data(), s_indices, sizeof(int) * TOPK, cudaMemcpyDeviceToHost, streams[i]);
+        cudaFreeAsync(s_indices, streams[i]);
         cudaFreeAsync(d_scores, streams[i]);
-      std::partial_sort(s_indices.begin(), s_indices.begin() + TOPK,
-                        s_indices.end(), [&scores](const int &a, const int &b) {
-                          if (scores[a] != scores[b]) {
-                            return scores[a] > scores[b];  // 按照分数降序排序
-                          }
-                          return a < b;  // 如果分数相同，按索引从小到大排序
-                        });
-      std::vector<int> s_ans(s_indices.begin(), s_indices.begin() + TOPK);
-      indices.push_back(s_ans);
+        cudaFreeAsync(d_query, streams[i]);
+      indices.push_back(host_indices_temp);
       
     }
     // cudaDeviceSynchronize();
-   
+  
+
 
   
    
