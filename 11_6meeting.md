@@ -2,16 +2,16 @@
 
 # Abstract
 
-* 压缩通信
+* 压缩通信 -》 500ms  -》125ms    **wyf** 
   * 具备优化的可行性
   * 进阶优化
     * *流水线 pipeline *
     * 进一步节省时间
 
 
-* cpu操作gpu加速
+* cpu操作gpu加速           **(yhy)**
 
-cpu  to gpu
+cpu to gpu
 ```cpp
 void pre_process(std::vector<std::vector<uint16_t>> &docs, uint16_t *h_docs,
                  std::vector<int> &h_doc_lens_vec) {
@@ -52,5 +52,8 @@ omp_set_num_threads(8);
 * stream 优化
 
 
-* 真·使用topk
+* 真·使用topk    大后期 
   * 有思路 有讲解 但是没能用的代码
+
+
+
