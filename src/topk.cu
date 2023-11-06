@@ -145,9 +145,11 @@ omp_set_num_threads(8);
 
 auto numProcs = omp_get_num_procs() ;
 // std::cout<<numProcs<<std::endl;
+
 // omp_set_num_threads(8);
 // int *host_indices= new int[n_docs]; // why
 // std::vector<int> host_indices(n_docs); // why
+
 
 // #pragma omp parallel
 //  {
@@ -155,6 +157,7 @@ auto numProcs = omp_get_num_procs() ;
   // for (int i = 0; i < n_docs; ++i) {
   //   host_indices[i] = i;
   // }
+
   // }
   cudaStream_t *streams;
   streams = (cudaStream_t *)malloc(querys_len * sizeof(cudaStream_t));
@@ -204,6 +207,7 @@ auto numProcs = omp_get_num_procs() ;
         thrust::sort_by_key(scores_key, scores_key + n_docs, s_indices_value,thrust::greater<float>());
 
         nvtxRangePop();
+
        
 
         std::vector<int> host_indices_temp(TOPK); // why
