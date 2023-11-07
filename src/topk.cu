@@ -161,6 +161,9 @@ omp_set_num_threads(8);
 
   cudaStream_t *streams;
   streams = (cudaStream_t *)malloc(querys_len * sizeof(cudaStream_t));
+  for (int i = 0; i < querys_len; i++) {    
+    cudaStreamCreate(&streams[i]);
+  }  
   t1.join();
   cudaMemcpyAsync(d_docs, h_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs,
                   cudaMemcpyHostToDevice, stream);
@@ -174,42 +177,40 @@ omp_set_num_threads(8);
     float *d_scores = nullptr;
     int *s_indices= nullptr;
 
-    nvtxRangePushA("stream create");
-    cudaStreamCreate(&streams[i]);
-    nvtxRangePop();
-
     auto &query = querys[i];
     const size_t query_len = query.size();
-    
+    nvtxRangePushA("cuda malloc");
+    cudaMallocAsync(&d_scores, sizeof(float) * n_docs, streams[querys_len-i-1]);
+    cudaMallocAsync(&s_indices, sizeof(int) * n_docs, streams[querys_len-i-1]);
     cudaMallocAsync(&d_query, sizeof(uint16_t) * query_len, streams[i]);
     cudaMemcpyAsync(d_query, query.data(), sizeof(uint16_t) * query_len,
                     cudaMemcpyHostToDevice, streams[i]);
-    cudaMallocAsync(&d_scores, sizeof(float) * n_docs, streams[i]);
-    cudaMallocAsync(&s_indices, sizeof(int) * n_docs, streams[i]);
-
+    cudaStreamSynchronize(streams[querys_len-i-1]);
+    nvtxRangePop();
+    nvtxRangePushA("topk kernal");
     docQueryScoringCoalescedMemoryAccessSampleKernel<<<grid, block, 0,
                                                        streams[i]>>>(
         d_docs, d_doc_lens, n_docs, d_query, query_len, d_scores, s_indices);
+    nvtxRangePop();
 
+    nvtxRangePushA("thrust device_ptr");
+    thrust::device_ptr<float> scores_key(d_scores);
+    thrust::device_ptr<int> s_indices_value(s_indices);
+    nvtxRangePop();
 
-        nvtxRangePushA("thrust device_ptr");
-        thrust::device_ptr<float> scores_key(d_scores);
-        thrust::device_ptr<int> s_indices_value(s_indices);
-        nvtxRangePop();
+    nvtxRangePushA("sort_by_key");
+    thrust::sort_by_key(scores_key, scores_key + n_docs, s_indices_value,thrust::greater<float>());
+    nvtxRangePop();
 
-        nvtxRangePushA("sort_by_key");
-        thrust::sort_by_key(scores_key, scores_key + n_docs, s_indices_value,thrust::greater<float>());
-        nvtxRangePop();
-
-        std::vector<int> host_indices_temp(TOPK); // why
-        cudaMemcpyAsync(host_indices_temp.data(), s_indices, sizeof(int) * TOPK, cudaMemcpyDeviceToHost, streams[i]);
-        cudaFreeAsync(s_indices, streams[i]);
-        cudaFreeAsync(d_scores, streams[i]);
-        cudaFreeAsync(d_query, streams[i]);
-        indices.push_back(host_indices_temp);
-        nvtxRangePop();
-      
-    }
+    std::vector<int> host_indices_temp(TOPK); // why
+    cudaMemcpyAsync(host_indices_temp.data(), s_indices, sizeof(int) * TOPK, cudaMemcpyDeviceToHost, streams[i]);
+    cudaFreeAsync(s_indices, streams[querys_len-i-1]);
+    cudaFreeAsync(d_scores, streams[querys_len-i-1]);
+    cudaFreeAsync(d_query, streams[i]);
+    indices.push_back(host_indices_temp);
+    nvtxRangePop();
+  
+  }
 
   // deallocation
   // cudaFree(d_docs);
