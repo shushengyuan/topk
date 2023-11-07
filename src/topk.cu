@@ -142,6 +142,7 @@ omp_set_num_threads(8);
   uint16_t *h_docs = new uint16_t[MAX_DOC_SIZE * n_docs];
 
   std::vector<int> h_doc_lens_vec(n_docs);
+  std::vector<std::vector<int>> indices_pre(querys.size(),std::vector<int>(TOPK));
 
   std::thread t1(pre_process, std::ref(docs), h_docs, std::ref(h_doc_lens_vec));
 
@@ -202,16 +203,14 @@ omp_set_num_threads(8);
     thrust::sort_by_key(scores_key, scores_key + n_docs, s_indices_value,thrust::greater<float>());
     nvtxRangePop();
 
-    std::vector<int> host_indices_temp(TOPK); // why
-    cudaMemcpyAsync(host_indices_temp.data(), s_indices, sizeof(int) * TOPK, cudaMemcpyDeviceToHost, streams[i]);
+    cudaMemcpyAsync(indices_pre[i].data(), s_indices, sizeof(int) * TOPK, cudaMemcpyDeviceToHost, streams[i]);
     cudaFreeAsync(s_indices, streams[querys_len-i-1]);
     cudaFreeAsync(d_scores, streams[querys_len-i-1]);
     cudaFreeAsync(d_query, streams[i]);
-    indices.push_back(host_indices_temp);
     nvtxRangePop();
   
   }
-
+  indices = indices_pre;
   // deallocation
   // cudaFree(d_docs);
   // cudaFreeAsync(d_query);
