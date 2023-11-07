@@ -80,6 +80,26 @@ void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
     d_index[doc_id] = doc_id;
   }
 }
+__global__ void pre_process_global(uint16_t *d_docs, int *d_doc_lens,int *docs, int n_docs,int cuda_docs_len,int ayer_1_offset,int layer_1_total_offset) {
+  // 获取线程索引
+  constexpr auto group_sz = sizeof(group_t) / sizeof(uint16_t);
+  register auto layer_0_stride = n_docs * group_sz;
+
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  // 检查索引是否有效
+  if (i < n_docs) {
+  
+    for (int j = 0; j < cuda_docs_len; j++) {
+      auto layer_0_offset = j / group_sz;
+
+      auto layer_2_offset = j % group_sz;
+      auto final_offset = layer_0_offset * layer_0_stride +
+                          layer_1_total_offset + layer_2_offset;
+      d_docs[final_offset] = docs[j];
+    }
+  }
+  d_doc_lens[i] = cuda_docs_len;
+}
 
 void pre_process(std::vector<std::vector<uint16_t>> &docs, uint16_t *h_docs,
                  std::vector<int> &h_doc_lens_vec) {
@@ -116,9 +136,7 @@ omp_set_num_threads(8);
     std::vector<std::vector<int>> &indices  // shape [querys.size(), TOPK]
 ) {
   auto n_docs = docs.size();
-  // float *d_scores = nullptr;
   uint16_t *d_docs = nullptr;
-  // uint16_t *d_query = nullptr;
   int *d_doc_lens = nullptr;
 
   uint16_t *h_docs = new uint16_t[MAX_DOC_SIZE * n_docs];
@@ -128,9 +146,7 @@ omp_set_num_threads(8);
   std::thread t1(pre_process, std::ref(docs), h_docs, std::ref(h_doc_lens_vec));
 
   cudaStream_t stream = cudaStreamPerThread;
-  // copy to device
   cudaMallocAsync(&d_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs, stream);
-  // cudaMallocAsync(&d_scores, sizeof(float) * n_docs, stream);
   cudaMallocAsync(&d_doc_lens, sizeof(int) * n_docs, stream);
 
   cudaDeviceProp device_props;
@@ -141,24 +157,7 @@ omp_set_num_threads(8);
   int block = N_THREADS_IN_ONE_BLOCK;
   int grid = (n_docs + block - 1) / block;
   int querys_len = querys.size();
-  // float ** scores_group;
 
-auto numProcs = omp_get_num_procs() ;
-// std::cout<<numProcs<<std::endl;
-
-// omp_set_num_threads(8);
-// int *host_indices= new int[n_docs]; // why
-// std::vector<int> host_indices(n_docs); // why
-
-
-// #pragma omp parallel
-//  {
-// #pragma omp for 
-  // for (int i = 0; i < n_docs; ++i) {
-  //   host_indices[i] = i;
-  // }
-
-  // }
   cudaStream_t *streams;
   streams = (cudaStream_t *)malloc(querys_len * sizeof(cudaStream_t));
   for (int i = 0; i < querys_len; i++) {
@@ -187,45 +186,28 @@ auto numProcs = omp_get_num_procs() ;
     cudaMallocAsync(&d_scores, sizeof(float) * n_docs, streams[i]);
     cudaMallocAsync(&s_indices, sizeof(int) * n_docs, streams[i]);
 
-    // cudaMemcpyAsync(s_indices, host_indices.data(), sizeof(int) * n_docs, cudaMemcpyHostToDevice, streams[i]);
-
     docQueryScoringCoalescedMemoryAccessSampleKernel<<<grid, block, 0,
                                                        streams[i]>>>(
         d_docs, d_doc_lens, n_docs, d_query, query_len, d_scores, s_indices);
-    
-        cudaFreeAsync(d_query, streams[i]);
-        // cudaMemcpyAsync(scores,d_scores, sizeof(float) * n_docs,
-        // cudaMemcpyDeviceToHost, streams[i]);
+
 
         nvtxRangePushA("thrust device_ptr");
         thrust::device_ptr<float> scores_key(d_scores);
         thrust::device_ptr<int> s_indices_value(s_indices);
         nvtxRangePop();
 
-
         nvtxRangePushA("sort_by_key");
         thrust::sort_by_key(scores_key, scores_key + n_docs, s_indices_value,thrust::greater<float>());
-
         nvtxRangePop();
-
-       
 
         std::vector<int> host_indices_temp(TOPK); // why
         cudaMemcpyAsync(host_indices_temp.data(), s_indices, sizeof(int) * TOPK, cudaMemcpyDeviceToHost, streams[i]);
         cudaFreeAsync(s_indices, streams[i]);
         cudaFreeAsync(d_scores, streams[i]);
         cudaFreeAsync(d_query, streams[i]);
-      indices.push_back(host_indices_temp);
+        indices.push_back(host_indices_temp);
       
     }
-    // cudaDeviceSynchronize();
-  
-
-
-  
-   
-    // cudaFreeAsync(d_query, stream);
-
 
   // deallocation
   // cudaFree(d_docs);
