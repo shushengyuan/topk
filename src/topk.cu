@@ -158,13 +158,9 @@ omp_set_num_threads(8);
   int grid = (n_docs + block - 1) / block;
   int querys_len = querys.size();
 
+
   cudaStream_t *streams;
   streams = (cudaStream_t *)malloc(querys_len * sizeof(cudaStream_t));
-  for (int i = 0; i < querys_len; i++) {
-    
-    cudaStreamCreate(&streams[i]);
-
-  }  
   t1.join();
   cudaMemcpyAsync(d_docs, h_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs,
                   cudaMemcpyHostToDevice, stream);
@@ -173,9 +169,14 @@ omp_set_num_threads(8);
  
   for (int i = 0; i < querys_len; ++i) {
     // init indices
+    nvtxRangePushA("Loop start");
     uint16_t *d_query = nullptr;
     float *d_scores = nullptr;
     int *s_indices= nullptr;
+
+    nvtxRangePushA("stream create");
+    cudaStreamCreate(&streams[i]);
+    nvtxRangePop();
 
     auto &query = querys[i];
     const size_t query_len = query.size();
@@ -206,6 +207,7 @@ omp_set_num_threads(8);
         cudaFreeAsync(d_scores, streams[i]);
         cudaFreeAsync(d_query, streams[i]);
         indices.push_back(host_indices_temp);
+        nvtxRangePop();
       
     }
 
