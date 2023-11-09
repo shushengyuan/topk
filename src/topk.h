@@ -1,8 +1,17 @@
 #pragma once
 #include <cuda.h>
+#include <dirent.h>
+#include <stdio.h>
+#include <sys/stat.h>
+#include <sys/time.h>
 
 #include <algorithm>
+#include <cassert>
+#include <chrono>
+#include <fstream>
 #include <iostream>
+#include <random>
+#include <sstream>
 #include <vector>
 
 #define MAX_DOC_SIZE 128
