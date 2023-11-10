@@ -4,6 +4,7 @@
 #include <thrust/host_vector.h>
 #include <thrust/sort.h>
 
+
 #include <thread>
 
 #include "assert.h"
@@ -121,8 +122,10 @@ void pre_process(std::vector<std::vector<uint16_t>> &docs, uint16_t *h_docs,
 #pragma unroll
     for (size_t j = 0; j < doc_size; j++) {
       h_docs[h_docs_vec[i] + j] = docs[i][j];
+
     }
   }
+  // }
 }
 
 void doc_query_scoring_gpu_function(
@@ -132,6 +135,7 @@ void doc_query_scoring_gpu_function(
 ) {
   std::chrono::high_resolution_clock::time_point t1 =
       std::chrono::high_resolution_clock::now();
+
 
   size_t n_docs = docs.size();
   int block = N_THREADS_IN_ONE_BLOCK;
@@ -195,6 +199,7 @@ void doc_query_scoring_gpu_function(
       << "init cost "
       << std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count()
       << " ms " << std::endl;
+
   for (int i = 0; i < querys_len; ++i) {
     // init indices
     nvtxRangePushA("Loop start");
