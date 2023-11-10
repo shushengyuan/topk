@@ -4,7 +4,6 @@
 #include <thrust/host_vector.h>
 #include <thrust/sort.h>
 
-
 #include <thread>
 
 #include "assert.h"
@@ -122,10 +121,8 @@ void pre_process(std::vector<std::vector<uint16_t>> &docs, uint16_t *h_docs,
 #pragma unroll
     for (size_t j = 0; j < doc_size; j++) {
       h_docs[h_docs_vec[i] + j] = docs[i][j];
-
     }
   }
-  // }
 }
 
 void doc_query_scoring_gpu_function(
@@ -136,7 +133,6 @@ void doc_query_scoring_gpu_function(
   std::chrono::high_resolution_clock::time_point t1 =
       std::chrono::high_resolution_clock::now();
 
-
   size_t n_docs = docs.size();
   int block = N_THREADS_IN_ONE_BLOCK;
   int grid = (n_docs + block - 1) / block;
@@ -144,6 +140,7 @@ void doc_query_scoring_gpu_function(
 
   uint16_t *d_docs = nullptr;
   uint16_t *d_doc_lens = nullptr;
+  nvtxRangePushA("new *");
   uint16_t *h_docs = new uint16_t[MAX_DOC_SIZE * n_docs];
   uint32_t *h_docs_vec = new uint32_t[n_docs + 1];
   // memset(h_docs, 0, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs);
@@ -151,7 +148,7 @@ void doc_query_scoring_gpu_function(
   std::vector<std::vector<int>> indices_pre(querys.size(),
                                             std::vector<int>(TOPK));
   std::thread t_pre(pre_process, std::ref(docs), h_docs, h_docs_vec);
-
+  nvtxRangePop();
   cudaDeviceProp device_props;
   cudaGetDeviceProperties(&device_props, 0);
   cudaSetDevice(0);
@@ -160,11 +157,13 @@ void doc_query_scoring_gpu_function(
   dim3 threadsPerBlock(32, 32);
 
   cudaStream_t *streams;
+  nvtxRangePushA("streams create");
   streams = (cudaStream_t *)malloc(querys_len * sizeof(cudaStream_t));
+#pragma unroll
   for (int i = 0; i < querys_len; i++) {
     cudaStreamCreate(&streams[i]);
   }
-
+  nvtxRangePop();
   cudaMallocAsync(&d_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs,
                   streams[0]);
   cudaMallocAsync(&d_doc_lens, sizeof(uint16_t) * n_docs, streams[1]);
@@ -174,24 +173,27 @@ void doc_query_scoring_gpu_function(
                   streams[2]);
   uint32_t *d_doc_sum = nullptr;
 
-  cudaMallocAsync(&d_doc_sum, sizeof(uint32_t) * (n_docs + 1), streams[1]);
+  cudaMallocAsync(&d_doc_sum, sizeof(uint32_t) * (n_docs + 1), streams[0]);
   t_pre.join();
+  nvtxRangePushA("temp_docs cp");
   cudaMallocAsync(&temp_docs, sizeof(uint16_t) * h_docs_vec[n_docs],
-                  streams[0]);
+                  streams[2]);
   cudaMemcpyAsync(d_doc_sum, h_docs_vec, sizeof(uint32_t) * (n_docs + 1),
                   cudaMemcpyHostToDevice, streams[0]);
 
   cudaMemcpyAsync(temp_docs, h_docs, sizeof(uint16_t) * h_docs_vec[n_docs],
-                  cudaMemcpyHostToDevice, streams[0]);
-
+                  cudaMemcpyHostToDevice, streams[2]);
+  nvtxRangePop();
+  nvtxRangePushA("pre_process_global cudaStreamSynchronize");
   cudaStreamSynchronize(streams[1]);
   cudaStreamSynchronize(streams[2]);
+  nvtxRangePop();
   nvtxRangePushA("pre_process_global start");
   pre_process_global<<<numBlocks, threadsPerBlock, 0, streams[0]>>>(
       temp_docs, d_docs, d_doc_lens, n_docs, d_doc_sum);
 
   nvtxRangePop();
-  cudaStreamSynchronize(streams[0]);
+
   std::chrono::high_resolution_clock::time_point t2 =
       std::chrono::high_resolution_clock::now();
 
@@ -199,7 +201,6 @@ void doc_query_scoring_gpu_function(
       << "init cost "
       << std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count()
       << " ms " << std::endl;
-
   for (int i = 0; i < querys_len; ++i) {
     // init indices
     nvtxRangePushA("Loop start");
