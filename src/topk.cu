@@ -1,12 +1,13 @@
 #include <nvtx3/nvToolsExt.h>
 // #include <omp.h>
-#include <assert.h>
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
 #include <thrust/sort.h>
 
+
 #include <thread>
 
+#include "assert.h"
 #include "topk.h"
 
 typedef uint4 group_t;  // uint32_t
@@ -83,50 +84,45 @@ void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
     d_index[doc_id] = doc_id;
   }
 }
-__global__ void pre_process_global(uint16_t *d_docs, int *d_doc_lens, int *docs,
-                                   int n_docs, int cuda_docs_len,
-                                   int ayer_1_offset,
-                                   int layer_1_total_offset) {
-  // 获取线程索引
-  constexpr auto group_sz = sizeof(group_t) / sizeof(uint16_t);
+__global__ void pre_process_global(const uint16_t *temp_docs, uint16_t *d_docs,
+                                   const uint16_t *d_doc_lens,
+                                   const size_t n_docs,
+                                   const uint32_t *d_doc_sum) {
+  register auto group_sz = sizeof(group_t) / sizeof(uint16_t);
   register auto layer_0_stride = n_docs * group_sz;
+  register auto layer_1_stride = group_sz;
 
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  // 检查索引是否有效
-  if (i < n_docs) {
-    for (int j = 0; j < cuda_docs_len; j++) {
-      auto layer_0_offset = j / group_sz;
-
-      auto layer_2_offset = j % group_sz;
-      auto final_offset = layer_0_offset * layer_0_stride +
-                          layer_1_total_offset + layer_2_offset;
-      d_docs[final_offset] = docs[j];
+  register auto tidx = blockIdx.x * blockDim.x + threadIdx.x,
+                tnumx = gridDim.x * blockDim.x;
+  register auto tidy = blockIdx.y * blockDim.y + threadIdx.y,
+                tnumy = gridDim.y * blockDim.y;
+#pragma unroll
+  for (auto i = tidx; i < n_docs; i += tnumx) {
+    register auto layer_1_offset = i;
+    register auto layer_1_total_offset = layer_1_offset * layer_1_stride;
+#pragma unroll
+    for (auto j = tidy; j < d_doc_lens[i]; j += tnumy) {
+      register auto layer_0_offset = j / group_sz;
+      register auto layer_2_offset = j % group_sz;
+      register auto final_offset = layer_0_offset * layer_0_stride +
+                                   layer_1_total_offset + layer_2_offset;
+      d_docs[final_offset] = temp_docs[d_doc_sum[i] + j];
     }
   }
-  d_doc_lens[i] = cuda_docs_len;
 }
 
-void pre_process(std::vector<std::vector<uint16_t>> &docs, uint16_t *h_docs) {
-  auto n_docs = docs.size();
+void pre_process(std::vector<std::vector<uint16_t>> &docs, uint16_t *h_docs,
+                 uint32_t *h_docs_vec) {
+  h_docs_vec[0] = 0;
+#pragma unroll
+  for (size_t i = 0; i < docs.size(); i++) {
+    auto doc_size = docs[i].size();
+    h_docs_vec[i + 1] = h_docs_vec[i] + doc_size;
 
-  constexpr auto group_sz = sizeof(group_t) / sizeof(uint16_t);
-  auto layer_0_stride = n_docs * group_sz;
-  constexpr auto layer_1_stride = group_sz;
+#pragma unroll
+    for (size_t j = 0; j < doc_size; j++) {
+      h_docs[h_docs_vec[i] + j] = docs[i][j];
 
-  //   omp_set_num_threads(8);
-  // #pragma omp parallel
-  //   {
-  // #pragma omp for
-  for (int i = 0; i < docs.size(); i++) {
-    auto layer_1_offset = i;
-    auto layer_1_total_offset = layer_1_offset * layer_1_stride;
-    for (int j = 0; j < docs[i].size(); j++) {
-      auto layer_0_offset = j / group_sz;
-
-      auto layer_2_offset = j % group_sz;
-      auto final_offset = layer_0_offset * layer_0_stride +
-                          layer_1_total_offset + layer_2_offset;
-      h_docs[final_offset] = docs[i][j];
     }
   }
   // }
@@ -137,40 +133,72 @@ void doc_query_scoring_gpu_function(
     std::vector<std::vector<uint16_t>> &docs, std::vector<uint16_t> &lens,
     std::vector<std::vector<int>> &indices  // shape [querys.size(), TOPK]
 ) {
-  auto n_docs = docs.size();
-  uint16_t *d_docs = nullptr;
-  uint16_t *d_doc_lens = nullptr;
+  std::chrono::high_resolution_clock::time_point t1 =
+      std::chrono::high_resolution_clock::now();
 
-  uint16_t *h_docs = new uint16_t[MAX_DOC_SIZE * n_docs];
 
-  std::vector<std::vector<int>> indices_pre(querys.size(),
-                                            std::vector<int>(TOPK));
-
-  std::thread t1(pre_process, std::ref(docs), h_docs);
-
-  cudaStream_t stream = cudaStreamPerThread;
-  cudaMallocAsync(&d_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs, stream);
-  cudaMallocAsync(&d_doc_lens, sizeof(uint16_t) * n_docs, stream);
-
-  cudaDeviceProp device_props;
-  cudaGetDeviceProperties(&device_props, 0);
-
-  cudaSetDevice(0);
-
+  size_t n_docs = docs.size();
   int block = N_THREADS_IN_ONE_BLOCK;
   int grid = (n_docs + block - 1) / block;
   int querys_len = querys.size();
+
+  uint16_t *d_docs = nullptr;
+  uint16_t *d_doc_lens = nullptr;
+  uint16_t *h_docs = new uint16_t[MAX_DOC_SIZE * n_docs];
+  uint32_t *h_docs_vec = new uint32_t[n_docs + 1];
+  // memset(h_docs, 0, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs);
+  uint16_t *temp_docs = nullptr;
+  std::vector<std::vector<int>> indices_pre(querys.size(),
+                                            std::vector<int>(TOPK));
+  std::thread t_pre(pre_process, std::ref(docs), h_docs, h_docs_vec);
+
+  cudaDeviceProp device_props;
+  cudaGetDeviceProperties(&device_props, 0);
+  cudaSetDevice(0);
+
+  dim3 numBlocks(32, 32);
+  dim3 threadsPerBlock(32, 32);
 
   cudaStream_t *streams;
   streams = (cudaStream_t *)malloc(querys_len * sizeof(cudaStream_t));
   for (int i = 0; i < querys_len; i++) {
     cudaStreamCreate(&streams[i]);
   }
-  t1.join();
-  cudaMemcpyAsync(d_docs, h_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs,
-                  cudaMemcpyHostToDevice, stream);
+
+  cudaMallocAsync(&d_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs,
+                  streams[0]);
+  cudaMallocAsync(&d_doc_lens, sizeof(uint16_t) * n_docs, streams[1]);
   cudaMemcpyAsync(d_doc_lens, lens.data(), sizeof(uint16_t) * n_docs,
-                  cudaMemcpyHostToDevice, stream);
+                  cudaMemcpyHostToDevice, streams[1]);
+  cudaMallocAsync(&temp_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs,
+                  streams[2]);
+  uint32_t *d_doc_sum = nullptr;
+
+  cudaMallocAsync(&d_doc_sum, sizeof(uint32_t) * (n_docs + 1), streams[1]);
+  t_pre.join();
+  cudaMallocAsync(&temp_docs, sizeof(uint16_t) * h_docs_vec[n_docs],
+                  streams[0]);
+  cudaMemcpyAsync(d_doc_sum, h_docs_vec, sizeof(uint32_t) * (n_docs + 1),
+                  cudaMemcpyHostToDevice, streams[0]);
+
+  cudaMemcpyAsync(temp_docs, h_docs, sizeof(uint16_t) * h_docs_vec[n_docs],
+                  cudaMemcpyHostToDevice, streams[0]);
+
+  cudaStreamSynchronize(streams[1]);
+  cudaStreamSynchronize(streams[2]);
+  nvtxRangePushA("pre_process_global start");
+  pre_process_global<<<numBlocks, threadsPerBlock, 0, streams[0]>>>(
+      temp_docs, d_docs, d_doc_lens, n_docs, d_doc_sum);
+
+  nvtxRangePop();
+  cudaStreamSynchronize(streams[0]);
+  std::chrono::high_resolution_clock::time_point t2 =
+      std::chrono::high_resolution_clock::now();
+
+  std::cout
+      << "init cost "
+      << std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count()
+      << " ms " << std::endl;
 
   for (int i = 0; i < querys_len; ++i) {
     // init indices
