@@ -148,7 +148,6 @@ void doc_query_scoring_gpu_function(
 
   uint16_t *d_docs = nullptr;
   uint16_t *d_doc_lens = nullptr;
-  uint16_t *h_docs = new uint16_t[MAX_DOC_SIZE * n_docs];
   uint16_t *h_query = new uint16_t[MAX_QUERY_SIZE * total_querys_len];
   uint16_t *temp_docs = nullptr;
   std::vector<uint16_t> query_lens_vec(total_querys_len);
@@ -156,11 +155,14 @@ void doc_query_scoring_gpu_function(
                                             std::vector<int>(TOPK));
 
   uint32_t *h_docs_vec = new uint32_t[n_docs + 1];
+
   h_docs_vec[0] = 0;
 #pragma unroll_completely
   for (size_t i = 0; i < n_docs; i++) {
     h_docs_vec[i + 1] = h_docs_vec[i] + lens[i];
   }
+
+  uint16_t *h_docs = new uint16_t[h_docs_vec[n_docs]];
   std::thread t_pre_1(pre_process, std::ref(docs), h_docs, h_docs_vec, 0,
                       n_docs / 2);
   std::thread t_pre_2(pre_process, std::ref(docs), h_docs, h_docs_vec,
