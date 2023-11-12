@@ -82,7 +82,8 @@ void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
 }
 __global__ void pre_process_global(const uint16_t *temp_docs, uint16_t *d_docs,
                                    const uint16_t *d_doc_lens,
-                                   const size_t n_docs) {
+                                   const size_t n_docs,
+                                   const uint32_t *d_doc_sum) {
   register auto group_sz = sizeof(group_t) / sizeof(uint16_t);
   register auto layer_0_stride = n_docs * group_sz;
   register auto layer_1_stride = group_sz;
@@ -91,33 +92,21 @@ __global__ void pre_process_global(const uint16_t *temp_docs, uint16_t *d_docs,
                 tnumx = gridDim.x * blockDim.x;
   register auto tidy = blockIdx.y * blockDim.y + threadIdx.y,
                 tnumy = gridDim.y * blockDim.y;
-
+  // #pragma unroll
   for (auto i = tidx; i < n_docs; i += tnumx) {
     register auto layer_1_offset = i;
     register auto layer_1_total_offset = layer_1_offset * layer_1_stride;
+    // #pragma unroll
     for (auto j = tidy; j < d_doc_lens[i]; j += tnumy) {
       register auto layer_0_offset = j / group_sz;
       register auto layer_2_offset = j % group_sz;
       register auto final_offset = layer_0_offset * layer_0_stride +
                                    layer_1_total_offset + layer_2_offset;
-      d_docs[final_offset] = temp_docs[i * MAX_DOC_SIZE + j];
+      d_docs[final_offset] = temp_docs[d_doc_sum[i] + j];
     }
   }
 }
 
-void pre_process(std::vector<std::vector<uint16_t>> &docs, uint16_t *h_docs) {
-  // h_docs_sum[0] = 0 ;
-#pragma unroll
-  for (size_t i = 0; i < docs.size(); i++) {
-    auto doc_size = docs[i].size();
-    // if (i != 0) {
-    //   h_docs_sum[i] = h_docs_sum[i - 1] + doc_size;
-    // }
-    for (size_t j = 0; j < doc_size; j++) {
-      h_docs[i * MAX_DOC_SIZE + j] = docs[i][j];
-    }
-  }
-}
 void query_thread(std::vector<std::vector<uint16_t>> &querys, uint16_t *h_query,
                   std::vector<uint16_t> &query_lens_vec) {
 #pragma unroll
@@ -126,6 +115,18 @@ void query_thread(std::vector<std::vector<uint16_t>> &querys, uint16_t *h_query,
     query_lens_vec[i] = querys_size;
     for (size_t j = 0; j < querys_size; j++) {
       h_query[i * MAX_QUERY_SIZE + j] = querys[i][j];
+    }
+  }
+}
+
+void pre_process(std::vector<std::vector<uint16_t>> &docs, uint16_t *h_docs,
+                 uint32_t *h_docs_vec, size_t start_idx, size_t lens) {
+#pragma unroll
+  for (size_t i = start_idx; i < lens; i++) {
+    auto doc_size = docs[i].size();
+#pragma unroll
+    for (size_t j = 0; j < doc_size; j++) {
+      h_docs[h_docs_vec[i] + j] = docs[i][j];
     }
   }
 }
@@ -153,7 +154,18 @@ void doc_query_scoring_gpu_function(
   std::vector<uint16_t> query_lens_vec(total_querys_len);
   std::vector<std::vector<int>> indices_pre(querys.size(),
                                             std::vector<int>(TOPK));
-  std::thread t_pre(pre_process, std::ref(docs), h_docs);
+
+  uint32_t *h_docs_vec = new uint32_t[n_docs + 1];
+  h_docs_vec[0] = 0;
+#pragma unroll_completely
+  for (size_t i = 0; i < n_docs; i++) {
+    h_docs_vec[i + 1] = h_docs_vec[i] + lens[i];
+  }
+  std::thread t_pre_1(pre_process, std::ref(docs), h_docs, h_docs_vec, 0,
+                      n_docs / 2);
+  std::thread t_pre_2(pre_process, std::ref(docs), h_docs, h_docs_vec,
+                      n_docs / 2, n_docs);
+
   std::thread t_query(query_thread, std::ref(querys), h_query,
                       std::ref(query_lens_vec));
 
@@ -172,20 +184,25 @@ void doc_query_scoring_gpu_function(
 
   cudaMallocAsync(&d_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs,
                   streams[0]);
-  cudaMallocAsync(&temp_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs,
+  uint32_t *d_doc_sum = nullptr;
+  cudaMallocAsync(&d_doc_sum, sizeof(uint32_t) * (n_docs + 1), streams[0]);
+  cudaMemcpyAsync(d_doc_sum, h_docs_vec, sizeof(uint32_t) * (n_docs + 1),
+                  cudaMemcpyHostToDevice, streams[0]);
+  cudaMallocAsync(&temp_docs, sizeof(uint16_t) * h_docs_vec[n_docs],
                   streams[2]);
   cudaMallocAsync(&d_doc_lens, sizeof(uint16_t) * n_docs, streams[1]);
   cudaMemcpyAsync(d_doc_lens, lens.data(), sizeof(uint16_t) * n_docs,
                   cudaMemcpyHostToDevice, streams[1]);
   cudaStreamSynchronize(streams[1]);
-  t_pre.join();
-  cudaMemcpyAsync(temp_docs, h_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs,
+  t_pre_1.join();
+  t_pre_2.join();
+  cudaMemcpyAsync(temp_docs, h_docs, sizeof(uint16_t) * h_docs_vec[n_docs],
                   cudaMemcpyHostToDevice, streams[2]);
 
   cudaStreamSynchronize(streams[2]);
   nvtxRangePushA("pre_process_global start");
   pre_process_global<<<numBlocks, threadsPerBlock, 0, streams[0]>>>(
-      temp_docs, d_docs, d_doc_lens, n_docs);
+      temp_docs, d_docs, d_doc_lens, n_docs, d_doc_sum);
   nvtxRangePop();
   cudaStreamSynchronize(streams[0]);
   std::chrono::high_resolution_clock::time_point t2 =
@@ -231,8 +248,8 @@ void doc_query_scoring_gpu_function(
                     sizeof(uint16_t) * MAX_QUERY_SIZE * bach_now,
                     cudaMemcpyHostToDevice, streams[i]);
 
-    cudaMallocAsync(&d_scores, sizeof(float) * n_docs * bach_now, streams[2]);
-    cudaMallocAsync(&s_indices, sizeof(int) * n_docs * bach_now, streams[3]);
+    cudaMallocAsync(&d_scores, sizeof(float) * n_docs * bach_now, streams[i]);
+    cudaMallocAsync(&s_indices, sizeof(int) * n_docs * bach_now, streams[i]);
     docQueryScoringCoalescedMemoryAccessSampleKernel<<<grid, block, 0,
                                                        streams[i]>>>(
         d_docs, d_doc_lens, n_docs, d_query, bach_now, query_lens_d + i,
@@ -263,8 +280,8 @@ void doc_query_scoring_gpu_function(
 
       cudaMemcpyAsync(indices_pre[j + i].data(), d_sort_index,
                       sizeof(int) * TOPK, cudaMemcpyDeviceToHost, streams[j]);
-      // cudaFreeAsync(d_sort_index, streams[j]);
-      // cudaFreeAsync(d_sort_scores, streams[j]);
+      cudaFreeAsync(d_sort_index, streams[j]);
+      cudaFreeAsync(d_sort_scores, streams[j]);
       nvtxRangePop();
     }
     cudaFreeAsync(s_indices, streams[i]);
