@@ -44,12 +44,13 @@ void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
     register auto start_index = (doc_id / n_docs) * MAX_QUERY_SIZE;
     register auto doc_index = doc_id % n_docs;
 
-#pragma unroll
-    for (auto i = threadIdx.x; i < query_len; i += blockDim.x) {
-      query_on_shm[i] =
-          query[start_index + i];  // not very efficient query loading
-                                   // temporally, as assuming its not hotspot
-    }
+    // #pragma unroll
+    //     for (auto i = threadIdx.x; i < query_len; i += blockDim.x) {
+    //       query_on_shm[i] =
+    //           query[start_index + i];  // not very efficient query loading
+    //                                    // temporally, as assuming its not
+    //                                    hotspot
+    //     }
     __syncthreads();
 
     for (auto i = 0; i < MAX_DOC_SIZE / GROUP_SIZE; i++) {
@@ -66,12 +67,12 @@ void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
           // return;
         }
         while (query_idx < query_len &&
-               query_on_shm[query_idx] < doc_segment[j]) {
+               query[start_index + query_idx] < doc_segment[j]) {
           ++query_idx;
         }
 
         if (query_idx < query_len) {
-          tmp_score += (query_on_shm[query_idx] == doc_segment[j]);
+          tmp_score += (query[start_index + query_idx] == doc_segment[j]);
         }
       }
       __syncwarp();
@@ -141,7 +142,7 @@ void doc_query_scoring_gpu_function(
 
   size_t n_docs = docs.size();
   int total_querys_len = querys.size();
-  const int BATCH_SIZE = total_querys_len / 2;
+  const int BATCH_SIZE = total_querys_len / 4;
 
   int block = N_THREADS_IN_ONE_BLOCK;
   int grid = ((BATCH_SIZE * n_docs) + block - 1) / block;
@@ -205,6 +206,8 @@ void doc_query_scoring_gpu_function(
   // nvtxRangePushA("pre_process_global start");
   pre_process_global<<<numBlocks, threadsPerBlock, 0, streams[0]>>>(
       temp_docs, d_docs, d_doc_lens, n_docs, d_doc_sum);
+  // cudaFreeAsync(&d_doc_sum, streams[0]);
+  // cudaFreeAsync(&temp_docs, streams[1]);
   // nvtxRangePop();
 
   // std::chrono::high_resolution_clock::time_point t2 =
@@ -214,7 +217,7 @@ void doc_query_scoring_gpu_function(
   //     << "init cost "
   //     << std::chrono::duration_cast<std::chrono::milliseconds>(t2 -
   //     t1).count()
-  free(h_docs);
+  // free(h_docs);
   t_query.join();
 
   uint16_t *query_lens_d = nullptr;
@@ -286,7 +289,7 @@ void doc_query_scoring_gpu_function(
                       sizeof(int) * TOPK, cudaMemcpyDeviceToHost, streams[j]);
       cudaFreeAsync(d_sort_index, streams[j]);
       cudaFreeAsync(d_sort_scores, streams[j]);
-      // cudaFree(d_temp_storage);
+      cudaFree(d_temp_storage);
       // nvtxRangePop();
     }
     cudaFreeAsync(s_indices, streams[i]);
@@ -303,5 +306,7 @@ void doc_query_scoring_gpu_function(
   // // deallocation
   // cudaFree(d_docs);
   // cudaFree(d_scores);
+  // cudaFreeAsync(d_docs, streams[0]);
+  // cudaFreeAsync(d_doc_lens, streams[0]);
   // cudaFree(d_doc_lens);
 }
