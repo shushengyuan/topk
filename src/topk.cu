@@ -46,11 +46,12 @@ void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
     register auto doc_index = doc_id % n_docs;
 
     // #pragma unroll
+
     //     for (auto i = threadIdx.x; i < query_len; i += blockDim.x) {
     //       query_on_shm[i] =
     //           query[start_index + i];  // not very efficient query loading
-    //                                    // temporally, as assuming its not
-    //                                    hotspot
+    //       // temporally, as assuming its not
+    //       // hotspot
     //     }
     __syncthreads();
 
@@ -280,36 +281,35 @@ void doc_query_scoring_gpu_function(
         d_scores, s_indices, d_query_sum + i);
     // free(h_query);
     // nvtxRangePop();
+    void *d_temp_storage = nullptr;
+    size_t temp_storage_bytes = 0;
+    int *d_sort_index = nullptr;
+    float *d_sort_scores = nullptr;
+
+    cudaMallocAsync(&d_sort_index, sizeof(int) * n_docs, streams[i]);
+    cudaMallocAsync(&d_sort_scores, sizeof(float) * n_docs, streams[i]);
+
+    cub::DeviceRadixSort::SortPairsDescending(
+        d_temp_storage, temp_storage_bytes, d_scores, d_sort_scores, s_indices,
+        d_sort_index, n_docs);
+    // Allocate temporary storage
+    cudaMallocAsync(&d_temp_storage, temp_storage_bytes, streams[i]);
+    // cudaDeviceSynchronize();
 #pragma unroll
     for (int j = 0; j < bach_now; ++j) {
       // nvtxRangePushA("sort_by_key");
-      void *d_temp_storage = nullptr;
-      size_t temp_storage_bytes = 0;
-      int *d_sort_index = nullptr;
-      float *d_sort_scores = nullptr;
-
-      cudaMallocAsync(&d_sort_index, sizeof(int) * n_docs, streams[j]);
-      cudaMallocAsync(&d_sort_scores, sizeof(float) * n_docs, streams[j]);
-
-      cub::DeviceRadixSort::SortPairsDescending(
-          d_temp_storage, temp_storage_bytes, d_scores + j * n_docs,
-          d_sort_scores, s_indices + j * n_docs, d_sort_index, n_docs);
-      // Allocate temporary storage
-      cudaMalloc(&d_temp_storage, temp_storage_bytes);
-      // cudaDeviceSynchronize();
-
       cub::DeviceRadixSort::SortPairsDescending(
           d_temp_storage, temp_storage_bytes, d_scores + j * n_docs,
           d_sort_scores, s_indices + j * n_docs, d_sort_index, n_docs);
 
       cudaMemcpyAsync(indices_pre[j + i].data(), d_sort_index,
                       sizeof(int) * TOPK, cudaMemcpyDeviceToHost, streams[j]);
-      cudaFreeAsync(d_sort_index, streams[j]);
-      cudaFreeAsync(d_sort_scores, streams[j]);
-      cudaFree(d_temp_storage);
+      cudaMemset(d_sort_index, 0, n_docs * sizeof(int));
+      cudaMemset(d_sort_scores, 0, n_docs * sizeof(float));
+      // cudaFree(d_temp_storage);
       // nvtxRangePop();
     }
-    cudaFreeAsync(s_indices, streams[i]);
+    // cudaFreeAsync(s_indices, streams[i]);
     // cudaFreeAsync(d_scores, streams[i]);
     // cudaFreeAsync(d_query, streams[i]);
 
