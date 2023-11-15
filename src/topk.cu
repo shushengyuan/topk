@@ -138,6 +138,11 @@ void doc_query_scoring_gpu_function(
   int grid = (n_docs + block - 1) / block;
   int querys_len = querys.size();
 
+  int *d_sort_index = nullptr;
+  float *d_sort_scores = nullptr;
+  void *d_temp_storage = nullptr;
+  size_t temp_storage_bytes = 0;
+
   uint16_t *d_docs = nullptr;
   uint16_t *d_doc_lens = nullptr;
   // nvtxRangePushA("new *");
@@ -172,6 +177,9 @@ void doc_query_scoring_gpu_function(
     cudaStreamCreate(&streams[i]);
   }
   // nvtxRangePop();
+  cudaMallocAsync(&d_sort_index, sizeof(int) * n_docs, streams[4]);
+  cudaMallocAsync(&d_sort_scores, sizeof(float) * n_docs, streams[4]);
+
   cudaMallocAsync(&d_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs,
                   streams[0]);
   cudaMallocAsync(&d_doc_lens, sizeof(uint16_t) * n_docs, streams[1]);
@@ -206,12 +214,13 @@ void doc_query_scoring_gpu_function(
 
   // std::chrono::high_resolution_clock::time_point t2 =
   // std::chrono::high_resolution_clock::now();
-
+  cudaStreamSynchronize(streams[4]);
   // std::cout
   //     << "init cost "
   //     << std::chrono::duration_cast<std::chrono::milliseconds>(t2 -
   //     t1).count()
   //     << " ms " << std::endl;
+
   for (int i = 0; i < querys_len; ++i) {
     // init indices
     // nvtxRangePushA("Loop start");
@@ -219,26 +228,16 @@ void doc_query_scoring_gpu_function(
     float *d_scores = nullptr;
     int *s_indices = nullptr;
 
-    void *d_temp_storage = nullptr;
-    size_t temp_storage_bytes = 0;
-    int *d_sort_index = nullptr;
-    float *d_sort_scores = nullptr;
-
-    cudaMallocAsync(&d_sort_index, sizeof(int) * n_docs, streams[i]);
-    cudaMallocAsync(&d_sort_scores, sizeof(float) * n_docs, streams[i]);
-
     auto &query = querys[i];
     const size_t query_len = query.size();
     // nvtxRangePushA("cuda malloc");
-    cudaMallocAsync(&d_scores, sizeof(float) * n_docs,
-                    streams[querys_len - i - 1]);
-    cudaMallocAsync(&s_indices, sizeof(int) * n_docs,
-                    streams[querys_len - i - 1]);
+    cudaMallocAsync(&d_scores, sizeof(float) * n_docs, streams[i]);
+    cudaMallocAsync(&s_indices, sizeof(int) * n_docs, streams[i]);
     cudaMallocAsync(&d_query, sizeof(uint16_t) * query_len, streams[i]);
     cudaMemcpyAsync(d_query, query.data(), sizeof(uint16_t) * query_len,
                     cudaMemcpyHostToDevice, streams[i]);
-    cudaStreamSynchronize(streams[querys_len - i - 1]);
     // nvtxRangePop();
+
     // nvtxRangePushA("topk kernal");
     docQueryScoringCoalescedMemoryAccessSampleKernel<<<grid, block, 0,
                                                        streams[i]>>>(
@@ -246,34 +245,29 @@ void doc_query_scoring_gpu_function(
     // nvtxRangePop();
 
     // nvtxRangePushA("sort_by_key");
+    if (i == 0) {
+      cub::DeviceRadixSort::SortPairsDescending(
+          d_temp_storage, temp_storage_bytes, d_scores, d_sort_scores,
+          s_indices, d_sort_index, n_docs);
+      // Allocate temporary storage
+      cudaMallocAsync(&d_temp_storage, temp_storage_bytes, streams[i]);
+    }
     cub::DeviceRadixSort::SortPairsDescending(
         d_temp_storage, temp_storage_bytes, d_scores, d_sort_scores, s_indices,
         d_sort_index, n_docs);
-    // Allocate temporary storage
-    cudaMalloc(&d_temp_storage, temp_storage_bytes);
-    // cudaDeviceSynchronize();
-
-    cub::DeviceRadixSort::SortPairsDescending(
-        d_temp_storage, temp_storage_bytes, d_scores, d_sort_scores, s_indices,
-        d_sort_index, n_docs);
-
     // nvtxRangePop();
 
     cudaMemcpyAsync(indices_pre[i].data(), d_sort_index, sizeof(int) * TOPK,
                     cudaMemcpyDeviceToHost, streams[i]);
-    // cudaFreeAsync(d_sort_index, streams[i]);
-    // cudaFreeAsync(d_sort_scores, streams[i]);
-    cudaFreeAsync(s_indices, streams[querys_len - i - 1]);
-    cudaFreeAsync(d_scores, streams[querys_len - i - 1]);
+
+    cudaFreeAsync(s_indices, streams[i]);
+    cudaFreeAsync(d_scores, streams[i]);
     cudaFreeAsync(d_query, streams[i]);
-    // cudaFree(d_temp_storage);
     // nvtxRangePop();
   }
   indices = indices_pre;
   // deallocation
   // cudaFree(d_docs);
-  // cudaFreeAsync(d_query);
-  // cudaFree(d_scores);
   // cudaFree(d_doc_lens);
   // free(h_docs);
 }
