@@ -22,8 +22,8 @@ typedef uint4 group_t;  // uint32_t
 
 void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
     const __restrict__ uint16_t *docs, const uint16_t *doc_lens,
-    const size_t n_docs, uint16_t *query, const int query_len, float *scores,
-    int *d_index) {
+    const size_t n_docs, const uint16_t *query, const int query_len,
+    float *scores, int *d_index) {
   // each thread process one doc-query pair scoring task
   register auto tid = blockIdx.x * blockDim.x + threadIdx.x,
                 tnum = gridDim.x * blockDim.x;
