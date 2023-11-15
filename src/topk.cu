@@ -34,7 +34,19 @@ void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
   }
   __shared__ uint32_t query_on_shm[MAX_QUERY_SIZE];
   // __shared__ uint32_t doc_lens_on_shm[n_docs];
-
+  if (tidx % bach_now == 0) {
+    register int q_id_0 = tidx / n_docs;
+    register auto start_index_0 = d_query_sum[q_id_0] - d_query_sum[0];
+    register auto query_len_0 = query_lens_d[q_id_0];
+#pragma unroll
+    for (auto i = threadIdx.y; i < query_len_0; i += blockDim.y) {
+      query_on_shm[i] =
+          d_query[start_index_0 + i];  // not very efficient query loading
+      // temporally, as assuming its not
+      // hotspot
+    }
+  }
+  __syncthreads();
   for (auto doc_id = tidx; doc_id < n_docs * bach_now; doc_id += tnumx) {
     register int query_idx = 0;
 
@@ -43,16 +55,9 @@ void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
     register bool no_more_load = false;
     register int q_id = doc_id / n_docs;
     register auto query_len = query_lens_d[q_id];
-    register auto start_index = d_query_sum[q_id] - d_query_sum[0];
+    // register auto start_index = d_query_sum[q_id] - d_query_sum[0];
     register auto doc_index = doc_id % n_docs;
 
-#pragma unroll
-    for (auto i = threadIdx.y; i < query_len; i += blockDim.y) {
-      query_on_shm[i] =
-          d_query[start_index + i];  // not very efficient query loading
-      // temporally, as assuming its not
-      // hotspot
-    }
     __syncthreads();
 
     for (auto i = 0; i < MAX_DOC_SIZE / GROUP_SIZE; i++) {
