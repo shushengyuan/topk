@@ -22,7 +22,7 @@ typedef uint4 group_t;  // uint32_t
 
 void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
     const __restrict__ uint16_t *docs, const uint16_t *doc_lens,
-    const size_t n_docs, uint16_t *d_query, const int bach_now,
+    const size_t n_docs, const uint16_t *d_query, const int bach_now,
     const uint16_t *query_lens_d, float *scores, int *s_indices,
     const uint32_t *d_query_sum) {
   // each thread process one doc-query pair scoring task
@@ -304,8 +304,8 @@ void doc_query_scoring_gpu_function(
 
       cudaMemcpyAsync(indices_pre[j + i].data(), d_sort_index,
                       sizeof(int) * TOPK, cudaMemcpyDeviceToHost, streams[j]);
-      cudaMemset(d_sort_index, 0, n_docs * sizeof(int));
-      cudaMemset(d_sort_scores, 0, n_docs * sizeof(float));
+      cudaMemsetAsync(d_sort_index, 0, n_docs * sizeof(int), streams[j]);
+      cudaMemsetAsync(d_sort_scores, 0, n_docs * sizeof(float), streams[j]);
       // cudaFree(d_temp_storage);
       // nvtxRangePop();
     }
