@@ -32,7 +32,7 @@ void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
   if (tidx >= n_docs * bach_now) {
     return;
   }
-  // __shared__ uint32_t query_on_shm[MAX_QUERY_SIZE];
+  __shared__ uint32_t query_on_shm[MAX_QUERY_SIZE];
   // __shared__ uint32_t doc_lens_on_shm[n_docs];
 
   for (auto doc_id = tidx; doc_id < n_docs * bach_now; doc_id += tnumx) {
@@ -41,18 +41,18 @@ void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
     register float tmp_score = 0.;
 
     register bool no_more_load = false;
-    register auto query_len = query_lens_d[doc_id / n_docs];
-    register auto start_index = d_query_sum[doc_id / n_docs] - d_query_sum[0];
+    register int q_id = doc_id / n_docs;
+    register auto query_len = query_lens_d[q_id];
+    register auto start_index = d_query_sum[q_id] - d_query_sum[0];
     register auto doc_index = doc_id % n_docs;
 
-    // #pragma unroll
-
-    //     for (auto i = threadIdx.x; i < query_len; i += blockDim.x) {
-    //       query_on_shm[i] =
-    //           query[start_index + i];  // not very efficient query loading
-    //       // temporally, as assuming its not
-    //       // hotspot
-    //     }
+#pragma unroll
+    for (auto i = threadIdx.y; i < query_len; i += blockDim.y) {
+      query_on_shm[i] =
+          d_query[start_index + i];  // not very efficient query loading
+      // temporally, as assuming its not
+      // hotspot
+    }
     __syncthreads();
 
     for (auto i = 0; i < MAX_DOC_SIZE / GROUP_SIZE; i++) {
@@ -69,16 +69,17 @@ void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
           // return;
         }
         while (query_idx < query_len &&
-               d_query[start_index + query_idx] < doc_segment[j]) {
+               query_on_shm[query_idx] < doc_segment[j]) {
           ++query_idx;
         }
 
         if (query_idx < query_len) {
-          tmp_score += (d_query[start_index + query_idx] == doc_segment[j]);
+          tmp_score += (query_on_shm[query_idx] == doc_segment[j]);
         }
       }
       __syncwarp();
     }
+
     scores[doc_id] = tmp_score / max(query_len, doc_lens[doc_index]);  // tidx
     s_indices[doc_id] = doc_index;
   }
@@ -145,7 +146,7 @@ void doc_query_scoring_gpu_function(
 
   size_t n_docs = docs.size();
   int total_querys_len = querys.size();
-  const int BATCH_SIZE = total_querys_len / 2;
+  const int BATCH_SIZE = total_querys_len;
 
   int block = N_THREADS_IN_ONE_BLOCK;
   int grid = ((BATCH_SIZE * n_docs) + block - 1) / block;
