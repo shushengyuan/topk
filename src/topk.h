@@ -1,3 +1,5 @@
+#define CUDA_API_PER_THREAD_DEFAULT_STREAM 1
+
 #pragma once
 #include <cuda.h>
 #include <dirent.h>
@@ -8,8 +10,6 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
-#include <fstream>
-#include <iostream>
 #include <random>
 #include <sstream>
 #include <vector>
