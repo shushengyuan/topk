@@ -4,6 +4,7 @@
 #include <thrust/host_vector.h>
 #include <thrust/sort.h>
 
+#include <numeric>
 #include <thread>
 
 #include "assert.h"
@@ -198,11 +199,9 @@ void doc_query_scoring_gpu_function(
   // nvtxRangePushA("new *");
   uint16_t *h_docs = new uint16_t[MAX_DOC_SIZE * n_docs];
   uint32_t *h_docs_vec = new uint32_t[n_docs + 1];
-  h_docs_vec[0] = 0;
-#pragma unroll_completely
-  for (size_t i = 0; i < n_docs; i++) {
-    h_docs_vec[i + 1] = h_docs_vec[i] + lens[i];
-  }
+  // h_docs_vec[0] = 0;
+  partial_sum(lens.begin(), lens.end(), h_docs_vec + 1);
+
   //   std::chrono::high_resolution_clock::time_point t4 =
   //   std::chrono::high_resolution_clock::now();
   //   std::cout
@@ -221,10 +220,9 @@ void doc_query_scoring_gpu_function(
   std::vector<std::thread> threads(num_threads);
   register size_t chunk_size = n_docs / num_threads;  // 分块大小
   for (size_t i = 0; i < num_threads; i++) {
-    size_t start = i * chunk_size;
     size_t end = (i == num_threads - 1) ? n_docs : start + chunk_size;
     threads[i] = std::thread(pre_process, std::ref(docs), h_docs, h_docs_vec,
-                             start, end);
+                             i * chunk_size, end);
   }
 
   // nvtxRangePop();
