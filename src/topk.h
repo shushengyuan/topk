@@ -1,4 +1,5 @@
 #pragma once
+#define CUDA_API_PER_THREAD_DEFAULT_STREAM 1
 #include <cuda.h>
 #include <dirent.h>
 #include <stdio.h>
