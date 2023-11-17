@@ -32,21 +32,15 @@ void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
   if (tidx >= n_docs * bach_now) {
     return;
   }
-  __shared__ uint32_t query_on_shm[MAX_QUERY_SIZE];
-  // __shared__ uint32_t doc_lens_on_shm[n_docs];
-  if (tidx % bach_now == 0) {
-    register int q_id_0 = tidx / n_docs;
-    register auto start_index_0 = d_query_sum[q_id_0] - d_query_sum[0];
-    register auto query_len_0 = query_lens_d[q_id_0];
+  __shared__ uint32_t query_on_shm[MAX_QUERY_SIZE * BATCH_SIZE];
+  register auto query_len_0 = d_query_sum[bach_now] - d_query_sum[0];
+
 #pragma unroll
-    for (auto i = threadIdx.y; i < query_len_0; i += blockDim.y) {
-      query_on_shm[i] =
-          d_query[start_index_0 + i];  // not very efficient query loading
-      // temporally, as assuming its not
-      // hotspot
-    }
+  for (auto i = threadIdx.x; i < query_len_0; i += blockDim.x) {
+    query_on_shm[i] = d_query[i];  // 不太高效的查询加载，假设它不是热点
   }
   __syncthreads();
+
   for (auto doc_id = tidx; doc_id < n_docs * bach_now; doc_id += tnumx) {
     register int query_idx = 0;
 
@@ -93,38 +87,40 @@ __global__ void pre_process_global(const uint16_t *temp_docs, uint16_t *d_docs,
                                    const uint16_t *d_doc_lens,
                                    const size_t n_docs,
                                    const uint32_t *d_doc_sum) {
-  register auto group_sz = sizeof(group_t) / sizeof(uint16_t);
-  register auto layer_0_stride = n_docs * group_sz;
-  register auto layer_1_stride = group_sz;
+  // register auto group_sz = 8;  // sizeof(group_t) / sizeof(uint16_t)
+  register auto layer_0_stride = n_docs * 8;  // group_sz;
+  // register auto layer_1_stride = 8;           // group_sz;
 
   register auto tidx = blockIdx.x * blockDim.x + threadIdx.x,
                 tnumx = gridDim.x * blockDim.x;
   register auto tidy = blockIdx.y * blockDim.y + threadIdx.y,
                 tnumy = gridDim.y * blockDim.y;
-  // #pragma unroll
+#pragma unroll
   for (auto i = tidx; i < n_docs; i += tnumx) {
-    register auto layer_1_offset = i;
-    register auto layer_1_total_offset = layer_1_offset * layer_1_stride;
-    // #pragma unroll
-    for (auto j = tidy; j < d_doc_lens[i]; j += tnumy) {
-      register auto layer_0_offset = j / group_sz;
-      register auto layer_2_offset = j % group_sz;
+    // register auto layer_1_offset = i;
+    register auto layer_1_total_offset = i << 3;
+    register auto base_id = d_doc_sum[i];
+    register auto d_lens = d_doc_lens[i];
+#pragma unroll
+    for (auto j = tidy; j < d_lens; j += tnumy) {
+      register auto layer_0_offset = j >> 3;  // group_sz;
+      register auto layer_2_offset = j & 7;   // j % group_sz;
       register auto final_offset = layer_0_offset * layer_0_stride +
                                    layer_1_total_offset + layer_2_offset;
-      d_docs[final_offset] = temp_docs[d_doc_sum[i] + j];
+      d_docs[final_offset] = temp_docs[base_id + j];
     }
   }
 }
-
 void query_thread(std::vector<std::vector<uint16_t>> &querys, uint16_t *h_query,
                   uint32_t *query_lens_sum) {
 #pragma unroll
   for (size_t i = 0; i < querys.size(); i++) {
-    auto querys_size = querys[i].size();
+    register auto querys_size = querys[i].size();
+    register auto qid = query_lens_sum[i];
 
 #pragma unroll
     for (size_t j = 0; j < querys_size; j++) {
-      h_query[query_lens_sum[i] + j] = querys[i][j];
+      h_query[qid + j] = querys[i][j];
     }
   }
 }
@@ -133,10 +129,11 @@ void pre_process(std::vector<std::vector<uint16_t>> &docs, uint16_t *h_docs,
                  uint32_t *h_docs_vec, size_t start_idx, size_t lens) {
 #pragma unroll
   for (size_t i = start_idx; i < lens; i++) {
-    auto doc_size = docs[i].size();
+    register auto doc_size = docs[i].size();
+    register auto hid = h_docs_vec[i];
 #pragma unroll
     for (size_t j = 0; j < doc_size; j++) {
-      h_docs[h_docs_vec[i] + j] = docs[i][j];
+      h_docs[hid + j] = docs[i][j];
     }
   }
 }
@@ -151,10 +148,10 @@ void doc_query_scoring_gpu_function(
 
   size_t n_docs = docs.size();
   int total_querys_len = querys.size();
-  const int BATCH_SIZE = total_querys_len;
+  const int batch_size = BATCH_SIZE;
 
   int block = N_THREADS_IN_ONE_BLOCK;
-  int grid = ((BATCH_SIZE * n_docs) + block - 1) / block;
+  int grid = ((batch_size * n_docs) + block - 1) / block;
 
   uint16_t *d_docs = nullptr;
   uint16_t *d_doc_lens = nullptr;
@@ -179,13 +176,17 @@ void doc_query_scoring_gpu_function(
 
   uint16_t *h_docs = new uint16_t[h_docs_vec[n_docs]];
   uint16_t *h_query = new uint16_t[query_lens_sum[total_querys_len]];
-
-  std::thread t_pre_1(pre_process, std::ref(docs), h_docs, h_docs_vec, 0,
-                      n_docs / 2);
-  std::thread t_pre_2(pre_process, std::ref(docs), h_docs, h_docs_vec,
-                      n_docs / 2, n_docs);
-
   std::thread t_query(query_thread, std::ref(querys), h_query, query_lens_sum);
+
+  size_t num_threads = 10;
+  std::vector<std::thread> threads(num_threads);
+  register size_t chunk_size = n_docs / num_threads;  // 分块大小
+  for (size_t i = 0; i < num_threads; i++) {
+    size_t start = i * chunk_size;
+    size_t end = (i == num_threads - 1) ? n_docs : start + chunk_size;
+    threads[i] = std::thread(pre_process, std::ref(docs), h_docs, h_docs_vec,
+                             start, end);
+  }
 
   cudaDeviceProp device_props;
   cudaGetDeviceProperties(&device_props, 0);
@@ -217,8 +218,9 @@ void doc_query_scoring_gpu_function(
   cudaMallocAsync(&d_doc_lens, sizeof(uint16_t) * n_docs, streams[1]);
   cudaMemcpyAsync(d_doc_lens, lens.data(), sizeof(uint16_t) * n_docs,
                   cudaMemcpyHostToDevice, streams[1]);
-  t_pre_1.join();
-  t_pre_2.join();
+  for (std::thread &t : threads) {
+    t.join();  // 等待所有线程完成
+  }
   cudaMemcpyAsync(temp_docs, h_docs, sizeof(uint16_t) * h_docs_vec[n_docs],
                   cudaMemcpyHostToDevice, streams[2]);
 
@@ -252,11 +254,11 @@ void doc_query_scoring_gpu_function(
   auto i = 0;
 
   while (i < total_querys_len) {
-    auto bach_now = BATCH_SIZE;
-    if (i + BATCH_SIZE == total_querys_len) {
-      bach_now = BATCH_SIZE;
+    auto bach_now = batch_size;
+    if (i + batch_size == total_querys_len) {
+      bach_now = batch_size;
       // break;
-    } else if (i + BATCH_SIZE > total_querys_len) {
+    } else if (i + batch_size > total_querys_len) {
       bach_now = total_querys_len - i;
     }
     if (bach_now == 0) {
@@ -268,16 +270,13 @@ void doc_query_scoring_gpu_function(
     float *d_scores = nullptr;
     int *s_indices = nullptr;
     uint16_t *d_query = nullptr;
+    auto q_len = query_lens_sum[i + bach_now] - query_lens_sum[i];
 
-    cudaMallocAsync(
-        &d_query,
-        sizeof(uint16_t) * (query_lens_sum[i + bach_now] - query_lens_sum[i]),
-        streams[i]);
+    cudaMallocAsync(&d_query, sizeof(uint16_t) * (q_len), streams[i]);
 
-    cudaMemcpyAsync(
-        d_query, h_query + query_lens_sum[i],
-        sizeof(uint16_t) * (query_lens_sum[i + bach_now] - query_lens_sum[i]),
-        cudaMemcpyHostToDevice, streams[i]);
+    cudaMemcpyAsync(d_query, h_query + query_lens_sum[i],
+                    sizeof(uint16_t) * (q_len), cudaMemcpyHostToDevice,
+                    streams[i]);
 
     cudaMallocAsync(&d_scores, sizeof(float) * n_docs * bach_now, streams[i]);
     cudaMallocAsync(&s_indices, sizeof(int) * n_docs * bach_now, streams[i]);
@@ -310,14 +309,12 @@ void doc_query_scoring_gpu_function(
 
       cudaMemcpyAsync(indices_pre[j + i].data(), d_sort_index,
                       sizeof(int) * TOPK, cudaMemcpyDeviceToHost, streams[j]);
-      cudaMemsetAsync(d_sort_index, 0, n_docs * sizeof(int), streams[j]);
-      cudaMemsetAsync(d_sort_scores, 0, n_docs * sizeof(float), streams[j]);
-      // cudaFree(d_temp_storage);
       // nvtxRangePop();
     }
-    // cudaFreeAsync(s_indices, streams[i]);
-    // cudaFreeAsync(d_scores, streams[i]);
-    // cudaFreeAsync(d_query, streams[i]);
+    cudaFreeAsync(s_indices, streams[i]);
+    cudaFreeAsync(d_scores, streams[i]);
+    cudaFreeAsync(d_query, streams[i]);
+    cudaFreeAsync(d_temp_storage, streams[i]);
 
     i += bach_now;
   }
