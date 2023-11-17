@@ -111,70 +111,53 @@ __global__ void pre_process_global(const uint16_t *temp_docs, uint16_t *d_docs,
     }
   }
 }
-
 void pre_process(std::vector<std::vector<uint16_t>> &docs, uint16_t *h_docs,
                  uint32_t *h_docs_vec, size_t start_idx, size_t lens) {
 // h_docs_vec[0] = 0;
 #pragma unroll
   for (size_t i = start_idx; i < lens; i++) {
     auto doc_size = docs[i].size();
-    // h_docs_vec[i + 1] = h_docs_vec[i] + doc_size;
-    register int doc_id = h_docs_vec[i];
-
-#pragma unroll
-    for (size_t j = 0; j < doc_size; j++) {
-      h_docs[doc_id + j] = docs[i][j];
-    }
+    memcpy(h_docs + h_docs_vec[i], &docs[i][0], doc_size * sizeof(uint16_t));
   }
 }
 
-void temp_docs_global_thread(uint16_t **temp_docs, uint16_t *h_docs,
-                             uint32_t *h_docs_vec, size_t n_docs) {
-  cudaSetDevice(0);
+void d_docs_malloc(uint16_t **d_docs, size_t n_docs) {
+  // cudaSetDevice(0);
+  cudaMalloc(d_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs);
+}
+void d_sort_scores_malloc(float **d_sort_scores, size_t n_docs) {
+  // cudaSetDevice(0);
+  cudaMalloc(d_sort_scores, sizeof(float) * n_docs);
+}
+void d_sort_index_malloc(int **d_sort_index, size_t n_docs) {
+  // cudaSetDevice(0);
+  cudaMalloc(d_sort_index, sizeof(int) * n_docs);
+}
 
+void temp_docs_copy(uint16_t **temp_docs, uint16_t *h_docs,
+                    uint32_t *h_docs_vec, size_t n_docs) {
+  // cudaSetDevice(0);
   cudaMalloc(temp_docs, sizeof(uint16_t) * h_docs_vec[n_docs]);
   CHECK(cudaMemcpy(*temp_docs, h_docs, sizeof(uint16_t) * h_docs_vec[n_docs],
                    cudaMemcpyHostToDevice));
-
-  // cudaDeviceSynchronize();
 }
 
-void d_doc_sum_global_thread(uint32_t **d_doc_sum, uint32_t *h_docs_vec,
-                             size_t n_docs) {
-  cudaSetDevice(0);
-  cudaMalloc(d_doc_sum, sizeof(uint32_t) * (n_docs + 1));
-  CHECK(cudaMemcpy(*d_doc_sum, h_docs_vec, sizeof(uint32_t) * (n_docs + 1),
-                   cudaMemcpyHostToDevice));
-}
-
-void malloc_global_thread_1(uint16_t **d_docs, size_t n_docs) {
-  cudaSetDevice(0);
-
-  cudaMalloc(d_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs);
-
-  // cudaDeviceSynchronize();
-}
-void malloc_global_thread_2(int **d_sort_index, float **d_sort_scores,
-                            uint16_t **d_doc_lens, std::vector<uint16_t> &lens,
-                            size_t n_docs) {
-  cudaSetDevice(0);
-  cudaMalloc(d_sort_index, sizeof(int) * n_docs);
-  cudaMalloc(d_sort_scores, sizeof(float) * n_docs);
+void d_doc_lens_malloc(uint16_t **d_doc_lens, std::vector<uint16_t> &lens,
+                       size_t n_docs) {
+  // cudaSetDevice(0);
   cudaMalloc(d_doc_lens, sizeof(uint16_t) * n_docs);
   CHECK(cudaMemcpy(*d_doc_lens, lens.data(), sizeof(uint16_t) * n_docs,
                    cudaMemcpyHostToDevice));
-
-  // cudaDeviceSynchronize();
 }
+void d_doc_sum_copy(uint32_t **d_doc_sum, uint16_t **temp_docs,
+                    uint32_t *h_docs_vec, std::vector<uint16_t> &lens,
+                    size_t n_docs) {
+  // cudaSetDevice(0);
+  cudaMalloc(d_doc_sum, sizeof(uint32_t) * (n_docs + 1));
 
-// void h_docs_vec_thread(uint16_t **h_docs, uint32_t **h_docs_vec,
-//                        std::vector<uint16_t> &lens, size_t n_docs) {
-//   *h_docs = new uint16_t[MAX_DOC_SIZE * n_docs];
-//   *h_docs_vec = new uint32_t[n_docs + 1];
-//   std::copy(lens.begin(), lens.end(), *h_docs_vec + 1);
-//   std::partial_sum(*h_docs_vec + 1, *h_docs_vec + n_docs + 1, *h_docs_vec +
-//   1);
-// }
+  CHECK(cudaMemcpy(*d_doc_sum, h_docs_vec, sizeof(uint32_t) * (n_docs + 1),
+                   cudaMemcpyHostToDevice));
+}
 
 void doc_query_scoring_gpu_function(
     std::vector<std::vector<uint16_t>> &querys,
@@ -208,22 +191,20 @@ void doc_query_scoring_gpu_function(
   dim3 numBlocks(32, 32);
   dim3 threadsPerBlock(32, 32);
 
-  std::thread malloc_thread_1(malloc_global_thread_1, &d_docs, n_docs);
-  std::thread malloc_thread_2(malloc_global_thread_2, &d_sort_index,
-                              &d_sort_scores, &d_doc_lens, std::ref(lens),
+  std::thread malloc_thread_1(d_docs_malloc, &d_docs, n_docs);
+  std::thread malloc_thread_2(d_sort_scores_malloc, &d_sort_scores, n_docs);
+  std::thread malloc_thread_3(d_sort_index_malloc, &d_sort_index, n_docs);
+  std::thread malloc_thread_4(d_doc_lens_malloc, &d_doc_lens, std::ref(lens),
                               n_docs);
 
-  // nvtxRangePushA("new *");
-
-  uint16_t *h_docs = new uint16_t[MAX_DOC_SIZE * n_docs];
   uint32_t *h_docs_vec = new uint32_t[n_docs + 1];
   std::copy(lens.begin(), lens.end(), h_docs_vec + 1);
   std::partial_sum(h_docs_vec + 1, h_docs_vec + n_docs + 1, h_docs_vec + 1);
+  std::thread malloc_thread_5(d_doc_sum_copy, &d_doc_sum, &temp_docs,
+                              h_docs_vec, std::ref(lens), n_docs);
 
-  std::thread copy_thread_2(d_doc_sum_global_thread, &d_doc_sum, h_docs_vec,
-                            n_docs);
-
-  size_t num_threads = 10;
+  uint16_t *h_docs = new uint16_t[MAX_DOC_SIZE * n_docs];
+  size_t num_threads = 8;
   std::vector<std::thread> threads(num_threads);
   register size_t chunk_size = n_docs / num_threads;  // 分块大小
   for (size_t i = 0; i < num_threads; i++) {
@@ -237,16 +218,16 @@ void doc_query_scoring_gpu_function(
     t.join();  // 等待所有线程完成
   }
 
-  std::thread copy_thread_3(temp_docs_global_thread, &temp_docs, h_docs,
-                            h_docs_vec, n_docs);
+  std::thread copy_thread_1(temp_docs_copy, &temp_docs, h_docs, h_docs_vec,
+                            n_docs);
 
   streams = (cudaStream_t *)malloc(querys_len * sizeof(cudaStream_t));
   std::vector<std::vector<int>> indices_pre(querys_len, std::vector<int>(TOPK));
 
-  copy_thread_3.join();
-  copy_thread_2.join();
-  malloc_thread_2.join();
   malloc_thread_1.join();
+  malloc_thread_4.join();
+  malloc_thread_5.join();
+  copy_thread_1.join();
 
   pre_process_global<<<numBlocks, threadsPerBlock>>>(
       temp_docs, d_docs, d_doc_lens, n_docs, d_doc_sum);
@@ -284,6 +265,8 @@ void doc_query_scoring_gpu_function(
 
     // nvtxRangePushA("sort_by_key");
     if (i == 0) {
+      malloc_thread_2.join();
+      malloc_thread_3.join();
       cub::DeviceRadixSort::SortPairsDescending(
           d_temp_storage, temp_storage_bytes, d_scores, d_sort_scores,
           s_indices, d_sort_index, n_docs);
