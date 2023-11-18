@@ -1,34 +1,31 @@
-#include <thread>
-#include <omp.h>
-
-
-#include <cub/cub.cuh> 
-
 #include <nvtx3/nvToolsExt.h>
-#include <cstdlib>
+// #include <omp.h>
+#include <thrust/device_vector.h>
+#include <thrust/host_vector.h>
+#include <thrust/sort.h>
+
+// #include <numeric>
+#include <thrust/execution_policy.h>
+#include <thrust/scan.h>
+
+#include <numeric>
+#include <thread>
+
+#include "assert.h"
 #include "topk.h"
+#include "unistd.h"
 
-using namespace cub;
 typedef uint4 group_t;  // uint32_t
-
-// #define CubDebugExit	(e)if(CUB_NS_QUALIFIER::Debug((cudaError_t) (e), __FILE__, __LINE__)) { exit(1); }
-
-#define CHECK(res) if(res!=cudaSuccess){exit(-1);}  
-
-constexpr size_t N = 10;
-using type = int64_t;
-using value_type = long;
-template<typename T>
-void print(T array[], size_t N) {
-    for(size_t i = 0; i < N; i++) {
-        std::cout << float(array[i]) << ", ";
-    }
-    std::cout << std::endl;
-}
+#define CHECK(res)          \
+  if (res != cudaSuccess) { \
+    exit(-1);               \
+  }
+#define GROUP_SIZE 8
 
 void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
-    const __restrict__ uint16_t *docs, const int *doc_lens, const size_t n_docs,
-    uint16_t *query, const int query_len, float *scores, int *d_index) {
+    const __restrict__ uint16_t *docs, const uint16_t *doc_lens,
+    const size_t n_docs, const uint16_t *query, const int query_len,
+    float *scores, int *d_index) {
   // each thread process one doc-query pair scoring task
   register auto tid = blockIdx.x * blockDim.x + threadIdx.x,
                 tnum = gridDim.x * blockDim.x;
@@ -38,10 +35,9 @@ void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
   }
 
   __shared__ uint32_t query_on_shm[MAX_QUERY_SIZE];
-  
+
 #pragma unroll
   for (auto i = threadIdx.x; i < query_len; i += blockDim.x) {
-    
     query_on_shm[i] = query[i];  // 不太高效的查询加载，假设它不是热点
   }
 
@@ -89,255 +85,233 @@ void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
     d_index[doc_id] = doc_id;
   }
 }
+__global__ void pre_process_global(const uint16_t *temp_docs, uint16_t *d_docs,
+                                   const uint16_t *d_doc_lens,
+                                   const size_t n_docs,
+                                   const uint32_t *d_doc_sum) {
+  register auto group_sz = sizeof(group_t) / sizeof(uint16_t);
+  register auto layer_0_stride = n_docs * group_sz;
+  register auto layer_1_stride = group_sz;
 
-void pre_process(std::vector<std::vector<uint16_t>> &docs, uint16_t *h_docs,
-                 std::vector<int> &h_doc_lens_vec) {
-  auto n_docs = docs.size();
-
-  constexpr auto group_sz = sizeof(group_t) / sizeof(uint16_t);
-  auto layer_0_stride = n_docs * group_sz;
-  constexpr auto layer_1_stride = group_sz;
-auto numProcs = omp_get_num_procs() ;
-
-omp_set_num_threads(8);
-#pragma omp parallel
-{
-#pragma omp for 
-  for (int i = 0; i < docs.size(); i++) {
-    auto layer_1_offset = i;
-    auto layer_1_total_offset = layer_1_offset * layer_1_stride;
-    for (int j = 0; j < docs[i].size(); j++) {
-      auto layer_0_offset = j / group_sz;
-
-      auto layer_2_offset = j % group_sz;
-      auto final_offset = layer_0_offset * layer_0_stride +
-                          layer_1_total_offset + layer_2_offset;
-      h_docs[final_offset] = docs[i][j];
+  register auto tidx = blockIdx.x * blockDim.x + threadIdx.x,
+                tnumx = gridDim.x * blockDim.x;
+  register auto tidy = blockIdx.y * blockDim.y + threadIdx.y,
+                tnumy = gridDim.y * blockDim.y;
+  // #pragma unroll
+  for (auto i = tidx; i < n_docs; i += tnumx) {
+    register auto layer_1_offset = i;
+    register auto layer_1_total_offset = layer_1_offset * layer_1_stride;
+    // #pragma unroll
+    for (auto j = tidy; j < d_doc_lens[i]; j += tnumy) {
+      register auto layer_0_offset = j / group_sz;
+      register auto layer_2_offset = j % group_sz;
+      register auto final_offset = layer_0_offset * layer_0_stride +
+                                   layer_1_total_offset + layer_2_offset;
+      d_docs[final_offset] = temp_docs[d_doc_sum[i] + j];
     }
-    h_doc_lens_vec[i] = docs[i].size();
-  }
   }
 }
 
-  void doc_query_scoring_gpu_function(
+void pre_process(std::vector<std::vector<uint16_t>> &docs, uint16_t *h_docs,
+                 uint32_t *h_docs_vec, size_t start_idx, size_t lens) {
+// h_docs_vec[0] = 0;
+#pragma unroll
+  for (size_t i = start_idx; i < lens; i++) {
+    auto doc_size = docs[i].size();
+    // h_docs_vec[i + 1] = h_docs_vec[i] + doc_size;
+    register int doc_id = h_docs_vec[i];
+
+#pragma unroll
+    for (size_t j = 0; j < doc_size; j++) {
+      h_docs[doc_id + j] = docs[i][j];
+    }
+  }
+}
+
+void temp_docs_global_thread(uint16_t **temp_docs, uint16_t *h_docs,
+                             uint32_t *h_docs_vec, size_t n_docs) {
+  cudaSetDevice(0);
+
+  cudaMalloc(temp_docs, sizeof(uint16_t) * h_docs_vec[n_docs]);
+  CHECK(cudaMemcpy(*temp_docs, h_docs, sizeof(uint16_t) * h_docs_vec[n_docs],
+                   cudaMemcpyHostToDevice));
+
+  // cudaDeviceSynchronize();
+}
+
+void d_doc_sum_global_thread(uint32_t **d_doc_sum, uint32_t *h_docs_vec,
+                             size_t n_docs) {
+  cudaSetDevice(0);
+  cudaMalloc(d_doc_sum, sizeof(uint32_t) * (n_docs + 1));
+  CHECK(cudaMemcpy(*d_doc_sum, h_docs_vec, sizeof(uint32_t) * (n_docs + 1),
+                   cudaMemcpyHostToDevice));
+}
+
+void malloc_global_thread_1(uint16_t **d_docs, size_t n_docs) {
+  cudaSetDevice(0);
+
+  cudaMalloc(d_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs);
+
+  // cudaDeviceSynchronize();
+}
+void malloc_global_thread_2(int **d_sort_index, float **d_sort_scores,
+                            uint16_t **d_doc_lens, std::vector<uint16_t> &lens,
+                            size_t n_docs,
+                            uint16_t **d_query,
+                            float **d_scores,
+                            int **s_indices) {
+  cudaSetDevice(0);
+  cudaMalloc(d_sort_index, sizeof(int) * n_docs);
+  cudaMalloc(d_sort_scores, sizeof(float) * n_docs);
+  cudaMalloc(d_doc_lens, sizeof(uint16_t) * n_docs);
+
+    cudaMalloc(d_scores, sizeof(float) * n_docs);
+    cudaMalloc(s_indices, sizeof(int) * n_docs);
+    cudaMalloc(d_query, sizeof(uint16_t) * MAX_QUERY_SIZE);
+  CHECK(cudaMemcpy(*d_doc_lens, lens.data(), sizeof(uint16_t) * n_docs,
+                   cudaMemcpyHostToDevice));
+
+  // cudaDeviceSynchronize();
+}
+
+// void h_docs_vec_thread(uint16_t **h_docs, uint32_t **h_docs_vec,
+//                        std::vector<uint16_t> &lens, size_t n_docs) {
+//   *h_docs = new uint16_t[MAX_DOC_SIZE * n_docs];
+//   *h_docs_vec = new uint32_t[n_docs + 1];
+//   std::copy(lens.begin(), lens.end(), *h_docs_vec + 1);
+//   std::partial_sum(*h_docs_vec + 1, *h_docs_vec + n_docs + 1, *h_docs_vec +
+//   1);
+// }
+
+void doc_query_scoring_gpu_function(
     std::vector<std::vector<uint16_t>> &querys,
     std::vector<std::vector<uint16_t>> &docs, std::vector<uint16_t> &lens,
     std::vector<std::vector<int>> &indices  // shape [querys.size(), TOPK]
 ) {
-  auto n_docs = docs.size();
-  std::vector<float> scores(n_docs);
-  std::vector<int> s_indices(n_docs);
-  // float *d_scores = nullptr;
-  uint16_t *d_docs = nullptr;
-  // uint16_t *d_query = nullptr;
-  int *d_doc_lens = nullptr;
+  // std::chrono::high_resolution_clock::time_point t1 =
+  //     std::chrono::high_resolution_clock::now();
 
-  uint16_t *h_docs = new uint16_t[MAX_DOC_SIZE * n_docs];
-
-  std::vector<int> h_doc_lens_vec(n_docs);
-
-  nvtxRangePushA("pre_process");
-  std::thread t1(pre_process, std::ref(docs), h_docs, std::ref(h_doc_lens_vec));
-  nvtxRangePop();
-
-  cudaStream_t stream = cudaStreamPerThread;
-  // copy to device
-
-  nvtxRangePushA("h_docs_decvice_to_host_Malloc");
-  cudaMalloc(&d_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs);
-  nvtxRangePop();
-
-  // cudaMallocAsync(&d_scores, sizeof(float) * n_docs, stream);
-  cudaMalloc(&d_doc_lens, sizeof(int) * n_docs);
-
-  cudaDeviceProp device_props;
-  cudaGetDeviceProperties(&device_props, 0);
-
-  cudaSetDevice(0);
-
+  register size_t n_docs = docs.size();
   int block = N_THREADS_IN_ONE_BLOCK;
   int grid = (n_docs + block - 1) / block;
   int querys_len = querys.size();
-  // float ** scores_group;
 
-auto numProcs = omp_get_num_procs() ;
-// std::cout<<numProcs<<std::endl;
-omp_set_num_threads(8);
-#pragma omp parallel
-	{
-#pragma omp for 
-  for (int i = 0; i < n_docs; ++i) {
-    s_indices[i] = i;
-  }
-  }
-  cudaStream_t *streams;
-  streams = (cudaStream_t *)malloc(querys_len * sizeof(cudaStream_t));
-  for (int i = 0; i < querys_len; i++) {
-    
-    cudaStreamCreate(&streams[i]);
+  int *d_sort_index = nullptr;
+  float *d_sort_scores = nullptr;
+  void *d_temp_storage = nullptr;
+  uint32_t *d_doc_sum = nullptr;
+  uint16_t *temp_docs = nullptr;
+  size_t temp_storage_bytes = 0;
 
-  }  
-  t1.join();
+  uint16_t *d_docs = nullptr;
+  uint16_t *d_doc_lens = nullptr;
 
-  nvtxRangePushA("h_docs_decvice_to_host_cudaMemcpyAsync");
-  cudaMemcpyAsync(d_docs, h_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs,
-                  cudaMemcpyHostToDevice, stream);
-  nvtxRangePop();
-  
-  nvtxRangePushA("h_doc_lens_vec.data()_decvice_to_host_cudaMemcpyAsync");
-  cudaMemcpyAsync(d_doc_lens, h_doc_lens_vec.data(), sizeof(int) * n_docs,
-                  cudaMemcpyHostToDevice, stream);
-  nvtxRangePop();
 
-  for (int i = 0; i < querys_len; ++i) {
-    // nvtx3::scoped_range range("This is a push/pop range");
-    // init indices
     uint16_t *d_query = nullptr;
     float *d_scores = nullptr;
-    float *d__sort_scores = nullptr;
+    int *s_indices = nullptr;
 
-    int *d_init_index = nullptr;
-    int *d_sort_index = nullptr;
-    int *h_sort_index = (int*)malloc(sizeof(int) * TOPK);
+
+  cudaDeviceProp device_props;
+  cudaGetDeviceProperties(&device_props, 0);
+  cudaSetDevice(0);
+
+  cudaStream_t *streams;
+  // nvtxRangePushA("streams create");
+  dim3 numBlocks(32, 32);
+  dim3 threadsPerBlock(32, 32);
+
+  std::thread malloc_thread_1(malloc_global_thread_1, &d_docs, n_docs);
+  std::thread malloc_thread_2(malloc_global_thread_2, &d_sort_index,
+                              &d_sort_scores, &d_doc_lens, std::ref(lens),
+                              n_docs, &d_query, &d_scores, &s_indices);
+
+  // nvtxRangePushA("new *");
+
+  uint16_t *h_docs = new uint16_t[MAX_DOC_SIZE * n_docs];
+  uint32_t *h_docs_vec = new uint32_t[n_docs + 1];
+  std::copy(lens.begin(), lens.end(), h_docs_vec + 1);
+  std::partial_sum(h_docs_vec + 1, h_docs_vec + n_docs + 1, h_docs_vec + 1);
+
+  std::thread copy_thread_2(d_doc_sum_global_thread, &d_doc_sum, h_docs_vec,
+                            n_docs);
+
+  size_t num_threads = 10;
+  std::vector<std::thread> threads(num_threads);
+  register size_t chunk_size = n_docs / num_threads;  // 分块大小
+  for (size_t i = 0; i < num_threads; i++) {
+    size_t start = i * chunk_size;
+    size_t end = (i == num_threads - 1) ? n_docs : start + chunk_size;
+    threads[i] = std::thread(pre_process, std::ref(docs), h_docs, h_docs_vec,
+                             start, end);
+  }
+
+  for (std::thread &t : threads) {
+    t.join();  // 等待所有线程完成
+  }
+
+  std::thread copy_thread_3(temp_docs_global_thread, &temp_docs, h_docs,
+                            h_docs_vec, n_docs);
+
+  streams = (cudaStream_t *)malloc(querys_len * sizeof(cudaStream_t));
+  std::vector<std::vector<int>> indices_pre(querys_len, std::vector<int>(TOPK));  
+
+  copy_thread_3.join();
+  copy_thread_2.join();
+  malloc_thread_2.join();
+  malloc_thread_1.join();
+
+  pre_process_global<<<numBlocks, threadsPerBlock>>>(
+      temp_docs, d_docs, d_doc_lens, n_docs, d_doc_sum);
+  // std::chrono::high_resolution_clock::time_point t6 =
+  //     std::chrono::high_resolution_clock::now();
+  // std::cout
+  //     << "init cost "
+  //     << std::chrono::duration_cast<std::chrono::milliseconds>(t6 -
+  //     t1).count()
+  //     << " ms " << std::endl;
+
+  for (int i = 0; i < querys_len; ++i) {
+    // init indices
+    // nvtxRangePushA("Loop start");
+    // CHECK(cudaStreamCreate(&streams[i]));
 
 
     auto &query = querys[i];
     const size_t query_len = query.size();
-    
+    // nvtxRangePushA("cuda malloc");
 
-    
-    cudaMalloc(&d_query, sizeof(uint16_t) * query_len);
-    cudaMemcpy(d_query, query.data(), sizeof(uint16_t) * query_len,
-                    cudaMemcpyHostToDevice);
-    cudaMalloc(&d_scores, sizeof(float) * n_docs);
-    cudaMalloc(&d__sort_scores, sizeof(float) * n_docs);
+    CHECK(cudaMemcpy(d_query, query.data(), sizeof(uint16_t) * query_len,
+                          cudaMemcpyHostToDevice));
+    // nvtxRangePop();
 
-    cudaMalloc(&d_init_index, sizeof(int) * n_docs);
+    // nvtxRangePushA("topk kernal");
+    docQueryScoringCoalescedMemoryAccessSampleKernel<<<grid, block, 0>>>(
+        d_docs, d_doc_lens, n_docs, d_query, query_len, d_scores, s_indices);
+    // nvtxRangePop();
 
-  // if(i == 0){
-   
-  // }
-  nvtxRangePushA("docQueryScoringCoalescedMemoryAccessSampleKernel");
-
-  docQueryScoringCoalescedMemoryAccessSampleKernel<<<grid, block, 0,
-                                                       streams[i]>>>(
-        d_docs, d_doc_lens, n_docs, d_query, query_len, d_scores, d_init_index);
-    
-        cudaFreeAsync(d_query, streams[i]);
-        nvtxRangePop();
-
-        // scores.data()_decvice_to_host_cudaMemcpyAsync
-        nvtxRangePushA("scores.data()_decvice_to_host_cudaMemcpyAsync");
-        // cudaMemcpyAsync(scores.data(), d_scores, sizeof(float) * n_docs,
-        // cudaMemcpyDeviceToHost, streams[i]);
-        nvtxRangePop();
-
-
-// -----------------cpu sort --------------------------------
-        // cudaFreeAsync(d_scores, streams[i]);
-
-      // partial_sort
-      // nvtxRangePushA("partial_sort");
-      // std::partial_sort(s_indices.begin(), s_indices.begin() + TOPK,
-      //                   s_indices.end(), [&scores](const int &a, const int &b) {
-      //                     if (scores[a] != scores[b]) {
-      //                       return scores[a] > scores[b];  // 按照分数降序排序
-      //                     }
-      //                     return a < b;  // 如果分数相同，按索引从小到大排序
-      //                   });
-      // std::vector<int> s_ans(s_indices.begin(), s_indices.begin() + TOPK);
-      // indices.push_back(s_ans);
-      // nvtxRangePop();
-
-      // nvtxRangePushA("GPU_topK");
-      // uint16_t *my_topk_gpu_scores = nullptr;                  
-      // cudaMalloc(&my_topk_gpu_scores, sizeof(uint16_t) * TOPK);              
-      // top_k_gpu(d_scores, sizeof(uint16_t) * n_docs, TOPK, my_topk_gpu_scores);
-      // nvtxRangePop();
-
-// -----------------gpu sort --------------------------------
-      // Allocate host arrays
-      // Determine temporary device storage requirements
-// SortPairs (void *d_temp_storage, size_t &temp_storage_bytes, const KeyT *d_keys_in, KeyT *d_keys_out, const ValueT *d_values_in, 
-// ValueT *d_values_out, NumItemsT num_items, int begin_bit=0, int end_bit=sizeof(KeyT)*8, cudaStream_t stream=0, bool debug_synchronous=false)
-      std::cout << "start gpu sort" << std::endl;
-
-      // cudaDeviceSynchronize();
-      // nvtxRangePushA("gpu sort");
-      // void     *d_temp_storage = NULL;
-      // size_t   temp_storage_bytes = 0;
-      // cudaStream_t stream=0;
-      // // CachingDeviceAllocator  g_allocator(true);  // Caching allocator for device memory
-
-      // // int size 
-      // nvtxRangePushA("DeviceRadixSort_1");
-      // cub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes,d_scores, d__sort_scores, d_init_index, d_sort_index, n_docs,0, sizeof(float)*8, stream, true);
-      // nvtxRangePop();
-
-      // // Allocate temporary storage
-      // cudaMalloc(&d_temp_storage, temp_storage_bytes);
-      // cudaDeviceSynchronize();
-
-      // // Run sorting operation
-      // nvtxRangePushA("DeviceRadixSort_2");
-      // cub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes,d_scores, d__sort_scores, d_init_index, d_sort_index, n_docs,0, sizeof(float)*8, stream, true);
-      // nvtxRangePop();
-
-
-      // nvtxRangePushA("indices.push_back(host_indices_temp);");
-      // // d_sort_index memcpy to the host as the result
-      // std::vector<int> host_indices_temp(TOPK);
-      // cudaMemcpy(host_indices_temp.data() , d_sort_index, sizeof(int) * TOPK, cudaMemcpyDeviceToHost);
-
-      // // std::vector<int> s_ans(h_sort_index, h_sort_index + TOPK);
-      // indices.push_back(host_indices_temp);
-
-      // // g_allocator.DeviceFree(d__sort_scores);
-      // // g_allocator.DeviceFree(d_sort_index);
-      // // g_allocator.DeviceFree(d_temp_storage);
-
-
-      // nvtxRangePop();
-      // nvtxRangePop();
-//  测试用例 这个就能无痛运行 ...
-      type *h1, *h2, *d1, *d2;
-      value_type *d3, *d4;
-      void *tmp;
-      h1 = new type[N];
-      h2 = new type[N];
-      for(size_t i = 0; i < N; i++) {
-          h1[i] = -i;
-      }
-      print(h1, N);
-
-      cudaMalloc(&d1, sizeof(type) * N);
-      cudaMalloc(&d2, sizeof(type) * N);
-      cudaMalloc(&d3, sizeof(value_type) * N);
-      cudaMalloc(&d4, sizeof(value_type) * N);
-      cudaMemcpy(d1, h1, sizeof(type) * N, cudaMemcpyDefault);
-      size_t temp_storage_bytes1;
-      cub::DeviceRadixSort::SortPairs(nullptr, temp_storage_bytes1, d1, d2, d3, d4, N, 0, 10);
-      cudaMalloc(&tmp, temp_storage_bytes1);
-      cudaDeviceSynchronize();
-      cub::DeviceRadixSort::SortPairs(tmp, temp_storage_bytes1, d1, d2, d3, d4, N, 0, 10);
-      cudaDeviceSynchronize();
-      cudaMemcpy(h2, d2, sizeof(type) * N, cudaMemcpyDefault);
-      print(h2, N);
-
+    // nvtxRangePushA("sort_by_key");
+    if (i == 0) {
+      cub::DeviceRadixSort::SortPairsDescending(
+          d_temp_storage, temp_storage_bytes, d_scores, d_sort_scores,
+          s_indices, d_sort_index, n_docs);
+      // Allocate temporary storage
+      CHECK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
     }
-    // cudaDeviceSynchronize();
-   
-
-  
-   
-    // cudaFreeAsync(d_query, stream);
-
-
+    cub::DeviceRadixSort::SortPairsDescending(
+        d_temp_storage, temp_storage_bytes, d_scores, d_sort_scores, s_indices,
+        d_sort_index, n_docs);
+    // nvtxRangePop();
+    CHECK(cudaMemcpy(indices_pre[i].data(), d_sort_index,
+                          sizeof(int) * TOPK, cudaMemcpyDeviceToHost));
+    // CHECK(cudaFreeAsync(s_indices, streams[i]));
+    // CHECK(cudaFreeAsync(d_scores, streams[i]));
+    // CHECK(cudaFreeAsync(d_query, streams[i]));
+    // nvtxRangePop();
+  }
+  indices = indices_pre;
   // deallocation
   // cudaFree(d_docs);
-  // cudaFreeAsync(d_query);
-  // cudaFree(d_scores);
   // cudaFree(d_doc_lens);
   // free(h_docs);
 }
-
