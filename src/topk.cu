@@ -50,7 +50,9 @@ void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
 
     register bool no_more_load = false;
 
-    for (auto i = 0; i < MAX_DOC_SIZE / GROUP_SIZE; i++) {
+    register size_t doc_len = MAX_DOC_SIZE >> 3;
+
+    for (auto i = 0; i < doc_len; i++) {
       if (no_more_load) {
         break;
       }
@@ -89,25 +91,27 @@ __global__ void pre_process_global(const uint16_t *temp_docs, uint16_t *d_docs,
                                    const uint16_t *d_doc_lens,
                                    const size_t n_docs,
                                    const uint32_t *d_doc_sum) {
-  register auto group_sz = sizeof(group_t) / sizeof(uint16_t);
-  register auto layer_0_stride = n_docs * group_sz;
-  register auto layer_1_stride = group_sz;
+  // register auto group_sz = 8;  // sizeof(group_t) / sizeof(uint16_t)
+  register auto layer_0_stride = n_docs * 8;  // group_sz;
+  // register auto layer_1_stride = 8;           // group_sz;
 
   register auto tidx = blockIdx.x * blockDim.x + threadIdx.x,
                 tnumx = gridDim.x * blockDim.x;
   register auto tidy = blockIdx.y * blockDim.y + threadIdx.y,
                 tnumy = gridDim.y * blockDim.y;
-  // #pragma unroll
+#pragma unroll
   for (auto i = tidx; i < n_docs; i += tnumx) {
-    register auto layer_1_offset = i;
-    register auto layer_1_total_offset = layer_1_offset * layer_1_stride;
-    // #pragma unroll
-    for (auto j = tidy; j < d_doc_lens[i]; j += tnumy) {
-      register auto layer_0_offset = j / group_sz;
-      register auto layer_2_offset = j % group_sz;
+    // register auto layer_1_offset = i;
+    register auto layer_1_total_offset = i << 3;
+    register auto base_id = d_doc_sum[i];
+    register auto d_lens = d_doc_lens[i];
+#pragma unroll
+    for (auto j = tidy; j < d_lens; j += tnumy) {
+      register auto layer_0_offset = j >> 3;  // group_sz;
+      register auto layer_2_offset = j & 7;   // j % group_sz;
       register auto final_offset = layer_0_offset * layer_0_stride +
                                    layer_1_total_offset + layer_2_offset;
-      d_docs[final_offset] = temp_docs[d_doc_sum[i] + j];
+      d_docs[final_offset] = temp_docs[base_id + j];
     }
   }
 }
@@ -117,7 +121,7 @@ void pre_process(std::vector<std::vector<uint16_t>> &docs, uint16_t *h_docs,
 // h_docs_vec[0] = 0;
 #pragma unroll
   for (size_t i = start_idx; i < lens; i++) {
-    auto doc_size = docs[i].size();
+    register auto doc_size = docs[i].size();
     // h_docs_vec[i + 1] = h_docs_vec[i] + doc_size;
     register int doc_id = h_docs_vec[i];
 
@@ -135,8 +139,6 @@ void temp_docs_global_thread(uint16_t **temp_docs, uint16_t *h_docs,
   cudaMalloc(temp_docs, sizeof(uint16_t) * h_docs_vec[n_docs]);
   CHECK(cudaMemcpy(*temp_docs, h_docs, sizeof(uint16_t) * h_docs_vec[n_docs],
                    cudaMemcpyHostToDevice));
-
-  // cudaDeviceSynchronize();
 }
 
 void d_doc_sum_global_thread(uint32_t **d_doc_sum, uint32_t *h_docs_vec,
@@ -151,8 +153,6 @@ void malloc_global_thread_1(uint16_t **d_docs, size_t n_docs) {
   cudaSetDevice(0);
 
   cudaMalloc(d_docs, sizeof(uint16_t) * MAX_DOC_SIZE * n_docs);
-
-  // cudaDeviceSynchronize();
 }
 void malloc_global_thread_2(int **d_sort_index, float **d_sort_scores,
                             uint16_t **d_doc_lens, std::vector<uint16_t> &lens,
@@ -163,8 +163,6 @@ void malloc_global_thread_2(int **d_sort_index, float **d_sort_scores,
   cudaMalloc(d_doc_lens, sizeof(uint16_t) * n_docs);
   CHECK(cudaMemcpy(*d_doc_lens, lens.data(), sizeof(uint16_t) * n_docs,
                    cudaMemcpyHostToDevice));
-
-  // cudaDeviceSynchronize();
 }
 
 // void h_docs_vec_thread(uint16_t **h_docs, uint32_t **h_docs_vec,
@@ -237,13 +235,16 @@ void doc_query_scoring_gpu_function(
     t.join();  // 等待所有线程完成
   }
 
-  std::thread copy_thread_3(temp_docs_global_thread, &temp_docs, h_docs,
-                            h_docs_vec, n_docs);
+  // std::thread copy_thread_3(temp_docs_global_thread, &temp_docs, h_docs,
+  //                           h_docs_vec, n_docs);
+  cudaMalloc(&temp_docs, sizeof(uint16_t) * h_docs_vec[n_docs]);
+  CHECK(cudaMemcpy(temp_docs, h_docs, sizeof(uint16_t) * h_docs_vec[n_docs],
+                   cudaMemcpyHostToDevice));
 
   streams = (cudaStream_t *)malloc(querys_len * sizeof(cudaStream_t));
   std::vector<std::vector<int>> indices_pre(querys_len, std::vector<int>(TOPK));
 
-  copy_thread_3.join();
+  // copy_thread_3.join();
   copy_thread_2.join();
   malloc_thread_2.join();
   malloc_thread_1.join();
