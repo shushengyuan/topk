@@ -125,6 +125,14 @@ void pre_process(std::vector<std::vector<uint16_t>> &docs, uint16_t *h_docs,
     memcpy(h_docs + h_docs_vec[i], &docs[i][0], doc_size * sizeof(uint16_t));
   }
 }
+void prepare(uint32_t **h_docs_vec, std::vector<uint16_t> &lens,
+             size_t *doc_size, size_t n_docs) {
+  auto it = max_element(std::begin(lens), std::end(lens));
+  *doc_size = (*it + 8 >> 3) << 3;
+  *h_docs_vec = new uint32_t[n_docs + 1];
+  std::copy(lens.begin(), lens.end(), *h_docs_vec + 1);
+  std::partial_sum(*h_docs_vec + 1, *h_docs_vec + n_docs + 1, *h_docs_vec + 1);
+}
 
 void d_docs_malloc(uint16_t **d_docs, size_t n_docs, size_t doc_size) {
   // cudaSetDevice(0);
@@ -187,6 +195,9 @@ void doc_query_scoring_gpu_function(
   uint16_t *d_docs = nullptr;
   uint16_t *d_doc_lens = nullptr;
 
+  uint32_t *h_docs_vec = nullptr;
+  size_t doc_size = 0;
+
   cudaDeviceProp device_props;
   cudaGetDeviceProperties(&device_props, 0);
   cudaSetDevice(0);
@@ -196,18 +207,15 @@ void doc_query_scoring_gpu_function(
   dim3 numBlocks(32, 32);
   dim3 threadsPerBlock(32, 32);
 
+  std::thread prepare_thread_1(prepare, &h_docs_vec, std::ref(lens), &doc_size,
+                               n_docs);
+
   std::thread malloc_thread_2(d_sort_scores_malloc, &d_sort_scores, n_docs);
   std::thread malloc_thread_3(d_sort_index_malloc, &d_sort_index, n_docs);
   std::thread malloc_thread_4(d_doc_lens_malloc, &d_doc_lens, std::ref(lens),
                               n_docs);
-  auto it = max_element(std::begin(lens), std::end(lens));
-  size_t doc_size = (*it + 8 >> 3) << 3;
-  // printf("doc_size %d \n", doc_size);
+  prepare_thread_1.join();
   std::thread malloc_thread_1(d_docs_malloc, &d_docs, n_docs, doc_size);
-
-  uint32_t *h_docs_vec = new uint32_t[n_docs + 1];
-  std::copy(lens.begin(), lens.end(), h_docs_vec + 1);
-  std::partial_sum(h_docs_vec + 1, h_docs_vec + n_docs + 1, h_docs_vec + 1);
   std::thread malloc_thread_5(d_doc_sum_copy, &d_doc_sum, &temp_docs,
                               h_docs_vec, std::ref(lens), n_docs);
 
@@ -245,21 +253,23 @@ void doc_query_scoring_gpu_function(
   malloc_thread_5.join();
   copy_thread_1.join();
 
-  std::chrono::high_resolution_clock::time_point t5 =
-      std::chrono::high_resolution_clock::now();
-  std::cout
-      << "before pre_process_global cost "
-      << std::chrono::duration_cast<std::chrono::milliseconds>(t5 - t1).count()
-      << " ms " << std::endl;
+  // std::chrono::high_resolution_clock::time_point t5 =
+  //     std::chrono::high_resolution_clock::now();
+  // std::cout
+  //     << "before pre_process_global cost "
+  //     << std::chrono::duration_cast<std::chrono::milliseconds>(t5 -
+  //     t1).count()
+  //     << " ms " << std::endl;
 
   pre_process_global<<<numBlocks, threadsPerBlock>>>(
       temp_docs, d_docs, d_doc_lens, n_docs, d_doc_sum);
-  std::chrono::high_resolution_clock::time_point t6 =
-      std::chrono::high_resolution_clock::now();
-  std::cout
-      << "init cost "
-      << std::chrono::duration_cast<std::chrono::milliseconds>(t6 - t1).count()
-      << " ms " << std::endl;
+  // std::chrono::high_resolution_clock::time_point t6 =
+  //     std::chrono::high_resolution_clock::now();
+  // std::cout
+  //     << "init cost "
+  //     << std::chrono::duration_cast<std::chrono::milliseconds>(t6 -
+  //     t1).count()
+  //     << " ms " << std::endl;
 
   for (int i = 0; i < querys_len; ++i) {
     // init indices
