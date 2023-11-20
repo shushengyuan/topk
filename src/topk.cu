@@ -89,7 +89,6 @@ void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
     d_index[doc_id] = doc_id;
   }
 }
-
 __global__ void pre_process_global(const uint16_t *temp_docs, uint16_t *d_docs,
                                    const uint16_t *d_doc_lens,
                                    const size_t n_docs,
@@ -176,7 +175,9 @@ void d_doc_lens_malloc(uint16_t **d_doc_lens, std::vector<uint16_t> &lens,
   CHECK(cudaMemcpy(*d_doc_lens, lens.data(), sizeof(uint16_t) * n_docs,
                    cudaMemcpyHostToDevice));
 }
-void d_doc_sum_copy(uint32_t **d_doc_sum, uint32_t *h_docs_vec, size_t n_docs) {
+void d_doc_sum_copy(uint32_t **d_doc_sum, uint16_t **temp_docs,
+                    uint32_t *h_docs_vec, std::vector<uint16_t> &lens,
+                    size_t n_docs) {
   // cudaSetDevice(0);
   cudaMalloc(d_doc_sum, sizeof(uint32_t) * (n_docs + 1));
 
@@ -229,7 +230,8 @@ void doc_query_scoring_gpu_function(
                               n_docs);
   prepare_thread_1.join();
   std::thread malloc_thread_1(d_docs_malloc, &d_docs, n_docs, doc_size);
-  std::thread malloc_thread_5(d_doc_sum_copy, &d_doc_sum, h_docs_vec, n_docs);
+  std::thread malloc_thread_5(d_doc_sum_copy, &d_doc_sum, &temp_docs,
+                              h_docs_vec, std::ref(lens), n_docs);
 
   uint16_t *h_docs = new uint16_t[doc_size * n_docs];
   size_t num_threads = 10;
@@ -326,6 +328,5 @@ void doc_query_scoring_gpu_function(
   CHECK(cudaFreeAsync(d_temp_storage, streams[3]));
   CHECK(cudaFreeAsync(d_docs, streams[4]));
   CHECK(cudaFreeAsync(d_doc_lens, streams[5]));
-  CHECK(cudaFreeAsync(temp_docs, streams[6]));
-  free(h_docs);
+  // free(h_docs);
 }
