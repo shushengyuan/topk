@@ -147,6 +147,7 @@ void temp_docs_copy(uint16_t **temp_docs, uint16_t *h_docs,
                    cudaMemcpyHostToDevice));
 }
 
+
 void d_doc_lens_malloc(uint16_t **d_doc_lens, std::vector<uint16_t> &lens,
                        size_t n_docs) {
   // cudaSetDevice(0);
@@ -232,6 +233,7 @@ void doc_query_scoring_gpu_function(
   streams = (cudaStream_t *)malloc(querys_len * sizeof(cudaStream_t));
   std::vector<std::vector<int>> indices_pre(querys_len, std::vector<int>(TOPK));
 
+
   std::chrono::high_resolution_clock::time_point t4 =
       std::chrono::high_resolution_clock::now();
   // std::cout
@@ -239,6 +241,7 @@ void doc_query_scoring_gpu_function(
   //     << std::chrono::duration_cast<std::chrono::milliseconds>(t4 -
   //     t1).count()
   //     << " ms " << std::endl;
+
 
   malloc_thread_1.join();
   malloc_thread_4.join();
