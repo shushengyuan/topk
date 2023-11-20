@@ -145,12 +145,15 @@ void d_docs_malloc(uint16_t **d_docs, size_t n_docs, size_t doc_size) {
   // cudaSetDevice(0);
   cudaMalloc(d_docs, sizeof(uint16_t) * doc_size * n_docs);
 }
-void d_sort_scores_malloc(float **d_sort_scores, size_t n_docs) {
+void d_sort_scores_malloc(float **d_sort_scores, int **s_indices,
+                          size_t n_docs) {
   // cudaSetDevice(0);
   cudaMalloc(d_sort_scores, sizeof(float) * n_docs);
+  CHECK(cudaMalloc(s_indices, sizeof(int) * n_docs));
 }
-void d_sort_index_malloc(int **d_sort_index, size_t n_docs) {
+void d_sort_index_malloc(int **d_sort_index, float **d_scores, size_t n_docs) {
   // cudaSetDevice(0);
+  CHECK(cudaMalloc(d_scores, sizeof(float) * n_docs));
   cudaMalloc(d_sort_index, sizeof(int) * n_docs);
 }
 
@@ -223,8 +226,10 @@ void doc_query_scoring_gpu_function(
                                &doc_size, n_docs);
   std::thread prepare_thread_2(prepare_2, std::ref(querys), &max_query);
 
-  std::thread malloc_thread_2(d_sort_scores_malloc, &d_sort_scores, n_docs);
-  std::thread malloc_thread_3(d_sort_index_malloc, &d_sort_index, n_docs);
+  std::thread malloc_thread_2(d_sort_scores_malloc, &d_sort_scores, &s_indices,
+                              n_docs);
+  std::thread malloc_thread_3(d_sort_index_malloc, &d_sort_index, &d_scores,
+                              n_docs);
   std::thread malloc_thread_4(d_doc_lens_malloc, &d_doc_lens, std::ref(lens),
                               n_docs);
   prepare_thread_1.join();
@@ -259,13 +264,16 @@ void doc_query_scoring_gpu_function(
     CHECK(cudaStreamCreate(&streams[i]));
   }
 
-  CHECK(cudaMallocAsync(&d_scores, sizeof(float) * n_docs, streams[0]));
-  CHECK(cudaMallocAsync(&s_indices, sizeof(int) * n_docs, streams[0]));
   prepare_thread_2.join();
-  printf("max_query %d \n", max_query);
-  CHECK(cudaMallocAsync(&d_query, sizeof(uint16_t) * max_query, streams[1]));
+  CHECK(cudaMallocAsync(&d_query, sizeof(uint16_t) * max_query, streams[0]));
   // std::chrono::high_resolution_clock::time_point t4 =
   //     std::chrono::high_resolution_clock::now();
+  malloc_thread_2.join();
+  malloc_thread_3.join();
+  cub::DeviceRadixSort::SortPairsDescending(d_temp_storage, temp_storage_bytes,
+                                            d_scores, d_sort_scores, s_indices,
+                                            d_sort_index, n_docs);
+  CHECK(cudaMallocAsync(&d_temp_storage, temp_storage_bytes, streams[0]));
 
   malloc_thread_1.join();
   malloc_thread_4.join();
@@ -297,28 +305,18 @@ void doc_query_scoring_gpu_function(
   //     << std::chrono::duration_cast<std::chrono::milliseconds>(t6 -
   //     t1).count()
   //     << " ms " << std::endl;
-  cudaStreamSynchronize(streams[1]);
   for (int i = 0; i < querys_len; ++i) {
-    // init indices
-    // nvtxRangePushA("Loop start");
-    // CHECK(cudaStreamCreate(&streams[i]));
-
     auto &query = querys[i];
     const size_t query_len = query.size();
     // nvtxRangePushA("cuda malloc");
     CHECK(cudaMemcpyAsync(d_query, query.data(), sizeof(uint16_t) * query_len,
                           cudaMemcpyHostToDevice, streams[i]));
 
-    // nvtxRangePop();
-
-    // nvtxRangePushA("topk kernal");
     docQueryScoringCoalescedMemoryAccessSampleKernel<<<grid, block, 0,
                                                        streams[i]>>>(
         d_docs, d_doc_lens, n_docs, d_query, query_len, d_scores, s_indices,
         doc_size);
-    // nvtxRangePop();
 
-    // nvtxRangePushA("sort_by_key");
     if (i == 0) {
       malloc_thread_2.join();
       malloc_thread_3.join();
@@ -335,13 +333,15 @@ void doc_query_scoring_gpu_function(
     CHECK(cudaMemcpyAsync(indices_pre[i].data(), d_sort_index,
                           sizeof(int) * TOPK, cudaMemcpyDeviceToHost,
                           streams[i]));
-
-    // nvtxRangePop();
   }
   indices = indices_pre;
-  // CHECK(cudaFreeAsync(d_temp_storage, streams[0]));
-  // CHECK(cudaFreeAsync(d_query, streams[1]));
   // deallocation
+  CHECK(cudaFreeAsync(d_scores, streams[0]));
+  CHECK(cudaFreeAsync(s_indices, streams[1]));
+  CHECK(cudaFreeAsync(d_query, streams[2]));
+  CHECK(cudaFreeAsync(d_temp_storage, streams[3]));
+  CHECK(cudaFreeAsync(d_docs, streams[4]));
+  CHECK(cudaFreeAsync(d_doc_lens, streams[5]));
   // cudaFree(d_docs);
   // cudaFree(d_doc_lens);
   // free(h_docs);
