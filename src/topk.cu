@@ -45,7 +45,8 @@ void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
     register float tmp_score = 0.;
     register bool no_more_load = false;
     register size_t doc_len =
-        doc_size >> 3;  // MAX_DOC_SIZE / (sizeof(group_t) / sizeof(uint16_t));
+        (doc_size + 8) >>
+        3;  // MAX_DOC_SIZE / (sizeof(group_t) / sizeof(uint16_t));
     register group_t *docs_register = (group_t *)docs + doc_id;
     register int right;
     register int mid;
@@ -268,9 +269,9 @@ void doc_query_scoring_gpu_function(
   malloc_thread_5.join();
   copy_thread_1.join();
 
-  pre_process_global<<<grid_pre, block_pre>>>(temp_docs, d_docs, d_doc_lens,
-                                              n_docs, d_doc_sum);
-  CHECK(cudaFreeAsync(temp_docs, streams[6]));
+  pre_process_global<<<grid_pre, block_pre, 0, streams[0]>>>(
+      temp_docs, d_docs, d_doc_lens, n_docs, d_doc_sum);
+  CHECK(cudaFreeAsync(temp_docs, streams[7]));
 
   // std::chrono::high_resolution_clock::time_point t6 =
   //     std::chrono::high_resolution_clock::now();
