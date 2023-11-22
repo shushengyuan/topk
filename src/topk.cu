@@ -44,15 +44,14 @@ void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
     register int query_idx = 0;
     register float tmp_score = 0.;
     register bool no_more_load = false;
-    // register size_t doc_len = // MAX_DOC_SIZE / (sizeof(group_t) /
-    // sizeof(uint16_t));
+    register size_t doc_len =
+        doc_size >> 3;  // MAX_DOC_SIZE / (sizeof(group_t) / sizeof(uint16_t));
     register group_t *docs_register = (group_t *)docs + doc_id;
     register int right;
     register int mid;
-    for (auto i = 0; i < 8 && !no_more_load; i++) {
+    for (auto i = 0; i < doc_len && !no_more_load; i++) {
       register group_t loaded = docs_register[i * n_docs];  // tid
       register uint16_t *doc_segment = (uint16_t *)(&loaded);
-
       for (auto j = 0; j < GROUP_SIZE; j++) {
         if (doc_segment[j] == 0) {
           no_more_load = true;
@@ -174,9 +173,6 @@ void d_doc_sum_copy(uint32_t **d_doc_sum, uint16_t **temp_docs,
                    cudaMemcpyHostToDevice));
 }
 
-int block = N_THREADS_IN_ONE_BLOCK;
-int block_pre = 16;
-
 void doc_query_scoring_gpu_function(
     std::vector<std::vector<uint16_t>> &querys,
     std::vector<std::vector<uint16_t>> &docs, std::vector<uint16_t> &lens,
@@ -184,7 +180,8 @@ void doc_query_scoring_gpu_function(
 ) {
   // std::chrono::high_resolution_clock::time_point t1 =
   //     std::chrono::high_resolution_clock::now();
-
+  int block = N_THREADS_IN_ONE_BLOCK;
+  int block_pre = 16;
   register size_t n_docs = docs.size();
   int grid = (n_docs + block - 1) / block;
   int grid_pre = (n_docs + block_pre - 1) / block_pre;
@@ -209,8 +206,6 @@ void doc_query_scoring_gpu_function(
   uint16_t *d_query = nullptr;
   cudaStream_t *streams;
 
-  // printf("%ld \n", sizeof(group_t));
-
   std::thread prepare_thread_1(prepare_1, &h_docs_vec, std::ref(lens),
                                &doc_size, n_docs);
   std::thread prepare_thread_2(prepare_2, std::ref(querys), &max_query);
@@ -222,6 +217,8 @@ void doc_query_scoring_gpu_function(
   std::thread malloc_thread_4(d_doc_lens_malloc, &d_doc_lens, std::ref(lens),
                               n_docs);
   prepare_thread_1.join();
+  // printf("%ld \n",  doc_size / sizeof(group_t) / sizeof(uint16_t));
+
   std::thread malloc_thread_1(d_docs_malloc, &d_docs, n_docs, doc_size);
   std::thread malloc_thread_5(d_doc_sum_copy, &d_doc_sum, &temp_docs,
                               h_docs_vec, std::ref(lens), n_docs);
