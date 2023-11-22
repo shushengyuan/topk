@@ -44,11 +44,12 @@ void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
     register int query_idx = 0;
     register float tmp_score = 0.;
     register bool no_more_load = false;
-    register size_t doc_len = n_docs >> 3;
+    // register size_t doc_len = // MAX_DOC_SIZE / (sizeof(group_t) /
+    // sizeof(uint16_t));
     register group_t *docs_register = (group_t *)docs + doc_id;
     register int right;
     register int mid;
-    for (auto i = 0; i < doc_len && !no_more_load; i++) {
+    for (auto i = 0; i < 8 && !no_more_load; i++) {
       register group_t loaded = docs_register[i * n_docs];  // tid
       register uint16_t *doc_segment = (uint16_t *)(&loaded);
 
@@ -207,6 +208,8 @@ void doc_query_scoring_gpu_function(
   int *s_indices = nullptr;
   uint16_t *d_query = nullptr;
   cudaStream_t *streams;
+
+  // printf("%ld \n", sizeof(group_t));
 
   std::thread prepare_thread_1(prepare_1, &h_docs_vec, std::ref(lens),
                                &doc_size, n_docs);
