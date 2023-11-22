@@ -2,21 +2,20 @@
 
 #pragma once
 #include <cuda.h>
-#include <dirent.h>
+#include <cuda_runtime.h>
 #include <stdio.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 
 #include <algorithm>
-#include <cassert>
 #include <chrono>
-#include <random>
-#include <sstream>
 #include <vector>
 
+#include "unistd.h"
+
 #define MAX_DOC_SIZE 128
-#define MAX_QUERY_SIZE 4096
-#define N_THREADS_IN_ONE_BLOCK 512
+#define MAX_QUERY_SIZE 128
+#define N_THREADS_IN_ONE_BLOCK 64
 #define TOPK 100
 #define GROUP_SIZE 8
 
