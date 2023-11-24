@@ -51,30 +51,25 @@ __launch_bounds__(256, 2) void __global__
 
   register int query_idx = 0;
   register float tmp_score = 0.;
-  register bool no_more_load = false;
   register int right;
   register int mid;
-  register size_t doc_len =
-      doc_size >>
-      SHIFT_SIZE;  // MAX_DOC_SIZE / (sizeof(group_t) / sizeof(uint16_t));
+  // MAX_DOC_SIZE / (sizeof(group_t) / sizeof(uint16_t));
 
   __syncthreads();
 
   for (auto doc_id = tid; doc_id < n_docs; doc_id += tnum) {
     query_idx = 0;
     tmp_score = 0.;
-    no_more_load = false;
     register auto docs_register = docs + doc_id;
+    register size_t doc_len = (doc_lens[doc_id] + GROUP_SIZE - 1) >> SHIFT_SIZE;
 
-    for (auto i = 0; i < doc_len && !no_more_load; i++) {
+    for (auto i = 0; i < doc_len; i++) {
       register group_t loaded = docs_register[i * n_docs];  // tid
       register uint16_t *doc_segment = (uint16_t *)(&loaded);
       for (auto j = 0; j < GROUP_SIZE; j++) {
         if (doc_segment[j] == 0) {
-          no_more_load = true;
           break;
         }
-        // int left = query_idx;
         right = query_len - 1;
         while (query_idx <= right) {
           mid = (query_idx + right) >> 1;
@@ -96,8 +91,8 @@ __launch_bounds__(256, 2) void __global__
 }
 
 __launch_bounds__(128, 2) __global__ void pre_process_global_fusion(
-    const __restrict__ uint16_t *temp_docs, uint16_t *d_docs,
-    const __restrict__ uint16_t *d_doc_lens, const size_t n_docs,
+    const __restrict__ uint16_t *temp_docs, uint16_t *docs,
+    const __restrict__ uint16_t *doc_lens, const size_t n_docs,
     const __restrict__ uint32_t *d_doc_sum, const __restrict__ uint16_t *query,
     const int query_len, float *scores, int *d_index, const size_t doc_size) {
   // register auto group_sz = 8;  // sizeof(group_t) / sizeof(uint16_t)
@@ -124,7 +119,7 @@ __launch_bounds__(128, 2) __global__ void pre_process_global_fusion(
     // register auto layer_1_offset = i;
     register auto layer_1_total_offset = i << SHIFT_SIZE;
     register auto base_id = d_doc_sum[i];
-    register auto d_lens = d_doc_lens[i];
+    register auto d_lens = doc_lens[i];
     register auto temp_docs_register = temp_docs + base_id;
 #pragma unroll
     for (auto j = 0; j < d_lens; j++) {
@@ -133,12 +128,11 @@ __launch_bounds__(128, 2) __global__ void pre_process_global_fusion(
       register auto layer_2_offset = j & (GROUP_SIZE - 1);    // j % group_sz;
       register auto final_offset = layer_0_offset * layer_0_stride +
                                    layer_1_total_offset + layer_2_offset;
-      d_docs[final_offset] = temp_docs_register[j];
+      docs[final_offset] = temp_docs_register[j];
     }
   }
   register int query_idx = 0;
   register float tmp_score = 0.;
-  register bool no_more_load = false;
   register int right;
   register int mid;
   register size_t doc_len = doc_size >> SHIFT_SIZE;
@@ -146,15 +140,13 @@ __launch_bounds__(128, 2) __global__ void pre_process_global_fusion(
   for (auto doc_id = tid; doc_id < n_docs; doc_id += tnum) {
     query_idx = 0;
     tmp_score = 0.;
-    no_more_load = false;
-    register auto docs_register = (group_t *)d_docs + doc_id;
+    register auto docs_register = (group_t *)docs + doc_id;
 
-    for (auto i = 0; i < doc_len && !no_more_load; i++) {
+    for (auto i = 0; i < doc_len; i++) {
       register group_t loaded = docs_register[i * n_docs];  // tid
       register uint16_t *doc_segment = (uint16_t *)(&loaded);
       for (auto j = 0; j < GROUP_SIZE; j++) {
         if (doc_segment[j] == 0) {
-          no_more_load = true;
           break;
         }
         // int left = query_idx;
@@ -171,7 +163,7 @@ __launch_bounds__(128, 2) __global__ void pre_process_global_fusion(
         tmp_score += (query_on_shm[query_idx] == doc_segment[j]);
       }
     }
-    scores[doc_id] = tmp_score / max(query_len, d_doc_lens[doc_id]);  // tid
+    scores[doc_id] = tmp_score / max(query_len, doc_lens[doc_id]);  // tid
     d_index[doc_id] = doc_id;
   }
 }
