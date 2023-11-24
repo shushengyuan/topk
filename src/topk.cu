@@ -15,65 +15,53 @@
 #include "common.h"
 #include "topk.h"
 
-typedef uint2 group_t;  // uint32_t
+typedef uint4 group_t;  // uint32_t
 
-#define GROUP_SIZE 4  // ulong4: 16
-#define SHIFT_SIZE 2
+#define GROUP_SIZE 8  // ulong4: 16
+#define SHIFT_SIZE 3
 
-__launch_bounds__(256, 2) void __global__
-    docQueryScoringCoalescedMemoryAccessSampleKernel(
-        group_t *docs, const __restrict__ uint16_t *doc_lens,
-        const size_t n_docs, const __restrict__ uint16_t *query,
-        const int query_len, float *scores, int *d_index,
-        const size_t doc_size) {
+void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
+    const __restrict__ uint16_t *docs, const uint16_t *doc_lens,
+    const size_t n_docs, const uint16_t *query, const int query_len,
+    float *scores, int *d_index, size_t doc_size) {
   // each thread process one doc-query pair scoring task
   register auto tid = blockIdx.x * blockDim.x + threadIdx.x,
                 tnum = gridDim.x * blockDim.x;
-  register auto tidx = threadIdx.x;
 
   if (tid >= n_docs) {
     return;
   }
 
   __shared__ uint32_t query_on_shm[MAX_QUERY_SIZE];
-  // __shared__ group_t doc_on_shm[32 * 4 * 8];
 
-  query_on_shm[tidx] = query[tidx];  // 不太高效的查询加载，假设它不是热点
-
-  // doc_on_shm[tidx] = (docs + tid)[0 * n_docs];
-  // doc_on_shm[tidx + 1] = (docs + tid)[1 * n_docs];
-  // doc_on_shm[tidx + 2] = (docs + tid)[2 * n_docs];
-  // doc_on_shm[tidx + 3] = (docs + tid)[3 * n_docs];
-  // doc_on_shm[tidx + 4] = (docs + tid)[4 * n_docs];
-  // doc_on_shm[tidx + 5] = (docs + tid)[5 * n_docs];
-  // doc_on_shm[tidx + 6] = (docs + tid)[6 * n_docs];
-  // doc_on_shm[tidx + 7] = (docs + tid)[7 * n_docs];
-
-  register int query_idx = 0;
-  register float tmp_score = 0.;
-  register int right;
-  register int mid;
-  // MAX_DOC_SIZE / (sizeof(group_t) / sizeof(uint16_t));
+  query_on_shm[threadIdx.x] =
+      query[threadIdx.x];  // 不太高效的查询加载，假设它不是热点
+  query_on_shm[threadIdx.x + 64] = query[threadIdx.x + 64];
 
   __syncthreads();
 
   for (auto doc_id = tid; doc_id < n_docs; doc_id += tnum) {
-    query_idx = 0;
-    tmp_score = 0.;
-    register auto docs_register = docs + doc_id;
-    register size_t doc_len = (doc_lens[doc_id] + GROUP_SIZE - 1) >> SHIFT_SIZE;
-
+    register int query_idx = 0;
+    register float tmp_score = 0.;
+    register size_t doc_len =
+        (doc_lens[doc_id] + GROUP_SIZE - 1) >>
+        SHIFT_SIZE;  // MAX_DOC_SIZE / (sizeof(group_t) / sizeof(uint16_t));
+    register group_t *docs_register = (group_t *)docs + doc_id;
+    register int right;
+    register int mid;
     for (auto i = 0; i < doc_len; i++) {
       register group_t loaded = docs_register[i * n_docs];  // tid
       register uint16_t *doc_segment = (uint16_t *)(&loaded);
       for (auto j = 0; j < GROUP_SIZE; j++) {
-        if (doc_segment[j] == 0) {
+        register uint16_t doc_segment_now = doc_segment[j];
+        if (doc_segment_now == 0) {
           break;
         }
+        // int left = query_idx;
         right = query_len - 1;
         while (query_idx <= right) {
           mid = (query_idx + right) >> 1;
-          if (query_on_shm[mid] < doc_segment[j]) {
+          if (query_on_shm[mid] < doc_segment_now) {
             query_idx = mid + 1;
           } else {
             right = mid - 1;
@@ -81,7 +69,7 @@ __launch_bounds__(256, 2) void __global__
         }
         // query_idx = left;  // update the query index
 
-        tmp_score += (query_on_shm[query_idx] == doc_segment[j]);
+        tmp_score += (query_on_shm[query_idx] == doc_segment_now);
       }
       // __syncwarp();
     }
@@ -131,17 +119,18 @@ __launch_bounds__(128, 2) __global__ void pre_process_global_fusion(
       docs[final_offset] = temp_docs_register[j];
     }
   }
-  register int query_idx = 0;
-  register float tmp_score = 0.;
-  register int right;
-  register int mid;
-  register size_t doc_len = doc_size >> SHIFT_SIZE;
-  __syncthreads();
-  for (auto doc_id = tid; doc_id < n_docs; doc_id += tnum) {
-    query_idx = 0;
-    tmp_score = 0.;
-    register auto docs_register = (group_t *)docs + doc_id;
 
+  __syncthreads();
+
+  for (auto doc_id = tid; doc_id < n_docs; doc_id += tnum) {
+    register int query_idx = 0;
+    register float tmp_score = 0.;
+    register size_t doc_len =
+        (doc_lens[doc_id] + GROUP_SIZE - 1) >>
+        SHIFT_SIZE;  // MAX_DOC_SIZE / (sizeof(group_t) / sizeof(uint16_t));
+    register group_t *docs_register = (group_t *)docs + doc_id;
+    register int right;
+    register int mid;
     for (auto i = 0; i < doc_len; i++) {
       register group_t loaded = docs_register[i * n_docs];  // tid
       register uint16_t *doc_segment = (uint16_t *)(&loaded);
@@ -159,9 +148,11 @@ __launch_bounds__(128, 2) __global__ void pre_process_global_fusion(
             right = mid - 1;
           }
         }
+        // query_idx = left;  // update the query index
 
         tmp_score += (query_on_shm[query_idx] == doc_segment[j]);
       }
+      __syncwarp();
     }
     scores[doc_id] = tmp_score / max(query_len, doc_lens[doc_id]);  // tid
     d_index[doc_id] = doc_id;
@@ -342,8 +333,8 @@ void doc_query_scoring_gpu_function(
 
     docQueryScoringCoalescedMemoryAccessSampleKernel<<<grid, block, 0,
                                                        streams[i]>>>(
-        (group_t *)d_docs, d_doc_lens, n_docs, d_query, query_len, d_scores,
-        s_indices, doc_size);
+        d_docs, d_doc_lens, n_docs, d_query, query_len, d_scores, s_indices,
+        doc_size);
 
     cub::DeviceRadixSort::SortPairsDescending(
         d_temp_storage, temp_storage_bytes, d_scores, d_scores + n_docs,

@@ -15,7 +15,7 @@
 
 #define MAX_DOC_SIZE 128
 #define MAX_QUERY_SIZE 128
-#define N_THREADS_IN_ONE_BLOCK 128
+#define N_THREADS_IN_ONE_BLOCK 64
 #define TOPK 100
 
 void doc_query_scoring_gpu_function(std::vector<std::vector<uint16_t>> &query,
