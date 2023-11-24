@@ -15,10 +15,10 @@
 #include "common.h"
 #include "topk.h"
 
-typedef ulong4 group_t;  // uint32_t
+typedef uint2 group_t;  // uint32_t
 
-#define GROUP_SIZE 16  // ulong4: 16
-#define SHIFT_SIZE 4
+#define GROUP_SIZE 4  // ulong4: 16
+#define SHIFT_SIZE 2
 
 __launch_bounds__(256, 2) void __global__
     docQueryScoringCoalescedMemoryAccessSampleKernel(
@@ -36,13 +36,18 @@ __launch_bounds__(256, 2) void __global__
   }
 
   __shared__ uint32_t query_on_shm[MAX_QUERY_SIZE];
-  __shared__ group_t *doc_on_shm[32];
+  // __shared__ group_t doc_on_shm[32 * 4 * 8];
 
   query_on_shm[tidx] = query[tidx];  // 不太高效的查询加载，假设它不是热点
-  query_on_shm[tidx + 32] = tidx + 32 < query_len ? query[tidx + 32] : 0;
-  query_on_shm[tidx + 64] = tidx + 64 < query_len ? query[tidx + 64] : 0;
-  query_on_shm[tidx + 96] = tidx + 96 < query_len ? query[tidx + 96] : 0;
-  doc_on_shm[tidx] = docs + tid;
+
+  // doc_on_shm[tidx] = (docs + tid)[0 * n_docs];
+  // doc_on_shm[tidx + 1] = (docs + tid)[1 * n_docs];
+  // doc_on_shm[tidx + 2] = (docs + tid)[2 * n_docs];
+  // doc_on_shm[tidx + 3] = (docs + tid)[3 * n_docs];
+  // doc_on_shm[tidx + 4] = (docs + tid)[4 * n_docs];
+  // doc_on_shm[tidx + 5] = (docs + tid)[5 * n_docs];
+  // doc_on_shm[tidx + 6] = (docs + tid)[6 * n_docs];
+  // doc_on_shm[tidx + 7] = (docs + tid)[7 * n_docs];
 
   register int query_idx = 0;
   register float tmp_score = 0.;
@@ -53,13 +58,13 @@ __launch_bounds__(256, 2) void __global__
       doc_size >>
       SHIFT_SIZE;  // MAX_DOC_SIZE / (sizeof(group_t) / sizeof(uint16_t));
 
-  __syncwarp();
+  __syncthreads();
 
   for (auto doc_id = tid; doc_id < n_docs; doc_id += tnum) {
     query_idx = 0;
     tmp_score = 0.;
     no_more_load = false;
-    register auto docs_register = doc_on_shm[tidx];
+    register auto docs_register = docs + doc_id;
 
     for (auto i = 0; i < doc_len && !no_more_load; i++) {
       register group_t loaded = docs_register[i * n_docs];  // tid
