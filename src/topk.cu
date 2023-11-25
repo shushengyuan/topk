@@ -13,6 +13,7 @@
 
 #include "assert.h"
 #include "topk.h"
+__constant__ uint16_t constant_query[MAX_QUERY_SIZE]; // 3 elements of type float (12 bytes)
 
 typedef uint4 group_t;  // uint32_t
 #define CHECK(res)          \
@@ -89,86 +90,96 @@ void __global__ docQueryScoringCoalescedMemoryAccessSampleKernel(
     d_index[doc_id] = doc_id;
   }
 }
+
+// __device__ __forceinline__ bool CheckEqualityPTX(uint16_t a, uint16_t b) {
+//     bool result;
+//     // uint32_t a32 = a, b32 = b;
+//     asm("{ \n\t"
+//         "setp.eq.u16 %0, %1, %2; \n\t"
+//         "}"
+//         : "=r"(result) : "r"(a), "r"(b));
+//     return result;
+// }
+// __device__ __forceinline__ bool CheckEqualityPTX(uint16_t a, uint16_t b) {
+//     uint32_t a32 = a, b32 = b;
+//     bool result;
+//     asm("setp.eq.u32 %0, %1, %2;" : "=r"(result) : "r"(a32), "r"(b32));
+//     return result;
+// }
+
+
 //  TODO  理清楚uint4 uin2 取址 解决255报错 然后保证性能 难道32同步很难? 
 __global__ void countMatchesOptimized(
-            const __restrict__  uint16_t* docs,
+            const uint16_t*  __restrict__ docs,
             const uint16_t *doc_lens,
             const uint16_t* query, 
             float* scores, 
             const size_t n_docs, 
             const int query_len,
             int *d_index) {
-    register auto doc_id = blockIdx.x * blockDim.x  + threadIdx.x ;
-    register auto  tnumx = blockDim.x * gridDim.x ;
-    register auto  lane_id = threadIdx.x & 0x1f;
-    register auto warp_id = threadIdx.x >> 5;
+     auto doc_id = blockIdx.x * blockDim.x  + threadIdx.x ;
+     auto  tnumx = blockDim.x * gridDim.x ;
     register int aggregate = 0;
-    register uint16_t match_count = 0;
-    register bool match = false;
-    register uint16_t test = warp_id;
-    register uint16_t  query_val  = 0;
+    register int match = 0;
+    register int  query_val  = 0;
+    register uint2 doc_data;
+    
     doc_id = doc_id >>5;
     tnumx = tnumx >>5;
     typedef cub::WarpReduce<int> WarpReduce;
 
-    // __shared__ uint32_t shared_query[ 32][129]; // 假设 query 长度最大为 128
-    __shared__ uint32_t shared_query[129]; // 假设 query 长度最大为 128
+    __shared__ uint32_t shared_query[128]; // 假设 query 长度最大为 128
 
     __shared__ typename WarpReduce::TempStorage temp_storage[N_THREADS_IN_ONE_BLOCK / 32];   // 512/32 -> 16
 
     if (threadIdx.x < query_len) {
-        // #pragma unroll
-        // register uint32_t query_tmpt =  query[threadIdx.x];
-        // for(auto j = 0; j < 32 ; j++)
-        // {
-        //     shared_query[j][threadIdx.x] = query_tmpt;
-        // }
-
             shared_query[threadIdx.x] = query[threadIdx.x];
-
     }
     __syncthreads();
+
+
 // 现在query 所在的共享内存读取还是太多 看看能不能就是只读query len次数/. doc 过一次 query  n_doc 次数
 // 耗时过高 可能的原因 寄存器内存花费过多 
 // 共享内存耗时高
 
-// 好像这样会因小失大 造成doc的巨量读取  doc query_len次数 query 1次
+// 好像这样会因小失大 造成doc的巨量读取  doc query_len次数 query 1次 
+    // register uint2 doc_data  = ((uint2 *)docs)[doc_id * 32 + threadIdx.x & 0x1f];  //放到外面 这样的话 可能会少几次访问? 
+    // query_val = shared_query[1] ;//移到外面 减少方寸次数 看看效果  750us
+
     #pragma unroll
     for (auto doc_index = doc_id; doc_index < n_docs; doc_index += tnumx) {
+        // __syncwarp();
         // 这里没对齐访问? 
-        register uint2 doc_data = ((uint2 *)docs)[doc_index * 32 + lane_id];
+        doc_data = ((uint2 *)docs)[doc_index * 32 + (threadIdx.x & 0x1f)];  //有耗时 但是不多 和放上面比 +200us 
+        // query_val = shared_query[0] ;//移到这里呢?  耗时+ 50us  这样计算的话 0.05 * 128  嗯 7ms耗时  还有办法救 用uint4 一次读取8个..  耗时的根源 ,,, 
 
-
-        match_count = 0;
-        // aggregate = 0;
+        match = 0;
         #pragma unroll
         for (int i = 0; i < query_len; i++) {
-            // if (lane_id == 0) query_val= shared_query[lane_id][i];  // 光share的访问就到1ms?  说好的广播呢 呜呜呜。
-            query_val= shared_query[i] +1 ;  // 光share的访问就到1ms?  说好的广播呢 呜呜呜。
 
-            // 找高效的宏 好像是这里耗时太多了 
-            match = false;
-            // match |= ( ((uint16_t *)(&doc_data))[0]== query_val);
-            // match |= ( ((uint16_t *)(&doc_data))[1]== query_val);
-            // match |= ( ((uint16_t *)(&doc_data))[2]== query_val);
-            // match |= ( ((uint16_t *)(&doc_data))[3]== query_val);
-            match |= ( 12== query_val);
-            match |= ( 123== query_val);
-            match |= ( 124== query_val);
-            match |= ( 125== query_val);
+            // query_val = reg_query[i] ;// % lane_id;  // 耗时的根源? 
 
-            match_count +=match;
+            query_val = shared_query[i] ;// % lane_id;  // 耗时的根源? 
+            // query_val = constant_query[i] ;// % lane_id;  // 耗时的根源?   尝试constant memory PTX里描述常量内存第一次使用会慢 后面就贼快
+
+            match += ( ((uint16_t *)(&doc_data))[0] == query_val); //计算耗时 300us total
+            match += ( ((uint16_t *)(&doc_data))[1] == query_val);
+            match += ( ((uint16_t *)(&doc_data))[2] == query_val);
+            match += ( ((uint16_t *)(&doc_data))[3] == query_val);
+
 
         }
-        // __syncwarp();
-        // __syncthreads();
 
-        aggregate = WarpReduce(temp_storage[warp_id]).Sum(match_count);  // warp加了后 耗时从700us -> 1600us (线程同步) -> 14000 warp 同步
+        aggregate = WarpReduce(temp_storage[(threadIdx.x >> 5)]).Sum(match);  // warp加了后 耗时从700us -> 1600us (线程同步) -> 14000 warp 同步
 
 
+        // aggregate = match;
+        if ((threadIdx.x & 0x1f) == 0) {
+            // __uint2float_rd ( unsigned int  x )
+            // 可能会用到转换
+            scores[doc_index] = static_cast<float>(aggregate) / max(static_cast<float>(doc_lens[doc_index]), static_cast<float>(query_len));
 
-        if (lane_id == 0) {
-            scores[doc_index] =aggregate;/// max(doc_lens[doc_index], query_len);
+            // scores[doc_index] =aggregate/ max(doc_lens[doc_index], query_len);
             d_index[doc_index] = doc_index;
         }
         // __syncwarp();
@@ -261,7 +272,7 @@ void d_doc_sum_copy(uint32_t **d_doc_sum, uint16_t **temp_docs,
                    cudaMemcpyHostToDevice));
 }
 
-int block = N_THREADS_IN_ONE_BLOCK;
+int block = 512;
 
 void doc_query_scoring_gpu_function(
     std::vector<std::vector<uint16_t>> &querys,
@@ -273,6 +284,7 @@ void doc_query_scoring_gpu_function(
 
   register size_t n_docs = docs.size();
   int grid = (n_docs + block - 1) / block;
+  
   int querys_len = querys.size();
 
   int *d_sort_index = nullptr;
@@ -295,7 +307,7 @@ void doc_query_scoring_gpu_function(
   cudaStream_t *streams;
 
   std::thread prepare_thread_1(prepare_1, &h_docs_vec, std::ref(lens),
-                               &doc_size, n_docs);
+                               &doc_size, n_docs);//70u
   std::thread prepare_thread_2(prepare_2, std::ref(querys), &max_query);
 
   std::thread malloc_thread_2(d_sort_scores_malloc, &d_sort_scores, &s_indices,
@@ -370,7 +382,7 @@ void doc_query_scoring_gpu_function(
   pre_process_global_no_reshape_shared<<<grid, block>>>(
       temp_docs, d_docs, d_doc_lens, n_docs, d_doc_sum);
 
-
+ 
   // std::chrono::high_resolution_clock::time_point t6 =
   //     std::chrono::high_resolution_clock::now();
   // std::cout
@@ -395,12 +407,14 @@ void doc_query_scoring_gpu_function(
     CHECK(cudaMemcpyAsync(d_query, query.data(), sizeof(uint16_t) * query_len,
                           cudaMemcpyHostToDevice, streams[i]));
 
+    cudaMemcpyToSymbol(constant_query, d_query, sizeof(uint16_t) * query_len,cudaMemcpyDeviceToDevice);
+
     // docQueryScoringCoalescedMemoryAccessSampleKernel<<<grid, block, 0,
     //                                                    streams[i]>>>(
     //     d_docs, d_doc_lens, n_docs, d_query, query_len, d_scores, s_indices,
     //     doc_size);
 
-
+//  线程资源不够?  
     countMatchesOptimized<<<grid, block, 0,streams[i]>>>(
          d_docs,
          d_doc_lens, 
